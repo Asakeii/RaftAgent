@@ -1,0 +1,60 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm, stat, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { startService } from "../src/server.js";
+import { sendControl, controlCommand } from "../src/control.js";
+import type { Agent, Room } from "../src/contracts.js";
+
+test("HTTP 身份与 socket 身份隔离，CLI 结果和消息可持久恢复", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "raft-service-"));
+  const service = await startService(resolve("."), dir, {});
+  let reopened: Awaited<ReturnType<typeof startService>> | undefined;
+  t.after(async () => { await service.close(); await reopened?.close(); await rm(dir, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${service.port}`;
+  assert.equal((await fetch(base + "/api/state")).status, 401);
+  const command = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: "user" }, { name, args, requestId: randomUUID() });
+  const created = await fetch(base + "/api/command", { method: "POST", headers: { Authorization: `Bearer ${service.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: "agent.create", args: { name: "A", role: "worker" }, requestId: "create-a" }) });
+  assert.equal(created.status, 200);
+  const a = (await created.json()).data as Agent;
+  assert.equal(a.workspace, join(dir, "workspaces", a.id));
+  assert.ok((await stat(a.workspace)).isDirectory());
+  await writeFile(join(a.workspace, "keep.txt"), "保留工作文件");
+  const room = command("room.create", { name: "群", members: [a.id] }) as Room;
+  service.store.transact(s => { s.agents.find(x => x.id === a.id)!.status = "running"; s.runs.push({ id: "run", agentId: a.id, status: "running", inputId: "i", at: "now" }); });
+  service.scheduler.tokens.set("cap", { kind: "agent", agentId: a.id, runId: "run", channel: room.id });
+  const c = await controlCommand(["room", "send", "--room", room.id, "--based-on", "0", "--body-file", "-", "--request-id", "once", "--json"], async () => "引号 ' 与换行\n都保留");
+  const result = await sendControl(c, { RAFT_SOCKET: service.socket, RAFT_RUN_TOKEN: "cap" }); assert.equal(result.ok, true);
+  assert.equal((await sendControl(c, { RAFT_SOCKET: service.socket, RAFT_RUN_TOKEN: "bad" })).ok, false);
+  assert.equal(service.store.state.messages[0]!.text, "引号 ' 与换行\n都保留");
+  const state = await fetch(base + "/api/state", { headers: { Authorization: `Bearer ${service.token}` } }).then(r => r.json());
+  assert.deepEqual(state.state.requests, {});
+  await assert.rejects(startService(resolve("."), dir, {}), /占用/);
+  await service.close();
+  reopened = await startService(resolve("."), dir, {});
+  assert.equal(reopened.store.state.agents[0]!.workspace, a.workspace);
+  assert.equal(await readFile(join(a.workspace, "keep.txt"), "utf8"), "保留工作文件");
+  assert.equal(reopened.store.state.messages.length, 1); assert.equal(reopened.store.state.agents[0]!.status, "error");
+});
+
+test("多消息合并唤醒，运行中不重复创建实例，用户停止后消息不能自动恢复", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "raft-scheduler-"));
+  let running = 0, peak = 0, calls = 0; let finish: (() => void) | undefined;
+  const service = await startService(resolve("."), dir, { ANTHROPIC_API_KEY: "test" }, async (_prompt, options, onMessage) => {
+    running++; calls++; peak = Math.max(peak, running);
+    await new Promise<void>(r => { finish = r; options.abortController!.signal.addEventListener("abort", () => r(), { once: true }); });
+    onMessage({ type: "result", subtype: "success", is_error: false, result: "done" } as SDKMessage); running--;
+  }); t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
+  const command = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: "user" }, { name, args, requestId: randomUUID() });
+  const a = command("agent.create", { name: "A", role: "worker" }) as Agent;
+  const room = command("room.create", { name: "群", members: [a.id] }) as Room;
+  for (let i = 0; i < 5; i++) command("room.send", { room: room.id, body: `${i}` });
+  await new Promise(r => setTimeout(r, 30)); assert.equal(calls, 1);
+  for (let i = 0; i < 5; i++) command("room.send", { room: room.id, body: `later ${i}` });
+  assert.equal(peak, 1);
+  command("agent.stop", { id: a.id }); service.scheduler.stop(a.id); finish?.();
+  await new Promise(r => setTimeout(r, 30)); assert.equal(calls, 1); assert.equal(service.store.state.agents[0]!.status, "stopped");
+});

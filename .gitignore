@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+
+dist-ui/
+.raft/
+llm-settings.json
+llm-settings.json.*.tmp
+tavily-settings.json
+tavily-settings.json.*.tmp

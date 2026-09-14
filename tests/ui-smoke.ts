@@ -1,0 +1,218 @@
+import { chromium } from "playwright";
+import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import assert from "node:assert/strict";
+import { startService } from "../src/server.js";
+const dir = await mkdtemp(join(tmpdir(), "raft-ui-"));
+// 界面测试只验证本地数据和交互，不向外部模型发送请求。
+const service = await startService(resolve("."), dir, {}, async () => {});
+const browser = await chromium.launch({ channel: "chrome", headless: true });
+const page = await browser.newPage({ viewport: { width: 1350, height: 900 } });
+const errors: string[] = []; page.on("pageerror", e => errors.push(e.message));
+try {
+  await page.goto(service.url); await page.getByRole("heading", { name: /让想法汇合/ }).waitFor();
+  await page.getByRole("button", { name: "＋ 创建 Agent", exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill("Atlas");
+  assert.equal(await page.getByLabel("本地工作目录").count(), 0);
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("heading", { name: "Atlas", exact: true }).waitFor();
+  await page.getByLabel("输入消息").fill("检查项目结构，并解释关键模块。"); await page.getByLabel("发送消息").click();
+  await page.getByText("检查项目结构，并解释关键模块。", { exact: true }).waitFor();
+  await page.getByLabel("创建 Agent", { exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill("Sage"); await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("heading", { name: "Sage", exact: true }).waitFor();
+  await page.getByLabel("创建群聊").click(); await page.getByLabel("名称", { exact: true }).fill("产品工作室"); await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("heading", { name: "# 产品工作室" }).waitFor();
+  const composer = page.getByLabel("输入消息");
+  const mentions = page.getByRole("listbox", { name: "可提及的 Agent" });
+  await composer.fill("@"); await mentions.waitFor();
+  assert.equal(await mentions.getByRole("option").count(), 2);
+  await composer.press("ArrowUp");
+  assert.match(await mentions.getByRole("option", { selected: true }).innerText(), /Sage/);
+  await composer.press("Enter");
+  assert.equal(await composer.inputValue(), "@Sage ");
+  assert.equal(service.store.state.messages.filter(m => m.channel === service.store.state.rooms[0]!.id).length, 0);
+  await composer.fill("@at");
+  assert.equal(await mentions.getByRole("option").count(), 1);
+  await composer.press("Tab"); assert.equal(await composer.inputValue(), "@Atlas ");
+  await composer.fill("@At 后续文字"); await composer.press("Home");
+  for (let i = 0; i < 3; i++) await composer.press("ArrowRight");
+  await mentions.getByRole("option").filter({ hasText: "Atlas" }).click();
+  assert.equal(await composer.inputValue(), "@Atlas  后续文字");
+  await composer.fill("@不存在的成员");
+  await page.getByRole("status").getByText("没有匹配的群成员").waitFor();
+  await composer.press("Enter"); assert.equal(await composer.inputValue(), "@不存在的成员");
+  await composer.press("Escape"); await mentions.waitFor({ state: "detached" });
+  await composer.fill("user@example.com"); assert.equal(await mentions.count(), 0);
+  await composer.fill("@"); await composer.dispatchEvent("compositionstart");
+  await composer.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  assert.equal(await composer.inputValue(), "@");
+  assert.equal(service.store.state.messages.filter(m => m.channel === service.store.state.rooms[0]!.id).length, 0);
+  await composer.dispatchEvent("compositionend"); await mentions.waitFor();
+  await composer.press("Escape"); await composer.press("Shift+Enter");
+  assert.equal(await composer.inputValue(), "@\n");
+  await page.getByLabel("输入消息").fill("@Atlas 梳理实现方案，@Sage 检查边界条件。请把发现简要发到群里。"); await page.getByLabel("发送消息").click();
+  await page.getByText("@Atlas 梳理实现方案，@Sage 检查边界条件。请把发现简要发到群里。", { exact: true }).waitFor();
+  assert.deepEqual(service.store.state.messages.find(m => m.channel === service.store.state.rooms[0]!.id)!.mentions, service.store.state.agents.map(a => a.id));
+  await page.getByRole("button", { name: "创建任务", exact: true }).click(); await page.getByLabel("任务目标").fill("完成登录流程审查"); await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.locator(".task").getByText("完成登录流程审查", { exact: true }).waitFor();
+  assert.equal(service.store.state.agents.length, 2);
+  const [first, second] = service.store.state.agents;
+  assert.notEqual(first!.workspace, second!.workspace);
+  for (const agent of service.store.state.agents) {
+    assert.equal(agent.workspace, join(dir, "workspaces", agent.id));
+    assert.ok((await stat(agent.workspace)).isDirectory());
+  } assert.equal(service.store.state.rooms.length, 1); assert.equal(service.store.state.tasks.length, 1);
+  const output = resolve(".raft/verification"); await mkdir(output, { recursive: true });
+  await page.screenshot({ path: join(output, "room.png"), animations: "disabled" });
+  await composer.fill("@"); await mentions.waitFor();
+  await page.screenshot({ path: join(output, "mentions.png"), animations: "disabled" });
+  await composer.fill("");
+  // 仅用于渲染验证的消息样例；不运行模型。
+  const markdown = [
+    "## 实现进展",
+    "",
+    "已完成 **Markdown 渲染**，支持 `inline code` 和 [参考文档](https://example.com/docs)。",
+    "第一行说明\n第二行说明",
+    "",
+    "> 先核验结果，再汇总给用户。",
+    "",
+    "1. 解析消息\n2. 展示结果\n   - 保留列表层级",
+    "",
+    "- [x] 代码高亮\n- [ ] 人工验收",
+    "",
+    "```typescript",
+    'const message = "READY";\nconsole.log(message);',
+    "```",
+    "",
+    "| 模块 | 状态 |\n| --- | --- |\n| 消息渲染 | 已完成 |\n| ~~旧格式~~ | 已替换 |",
+  ].join("\n");
+  const roomId = service.store.state.rooms[0]!.id;
+  service.store.transact(s => {
+    s.messages.push({ id: "markdown-fixture", channel: roomId, sender: first!.id, text: markdown, mentions: [], at: new Date().toISOString() });
+  });
+  const message = page.locator(".message").filter({ has: page.getByRole("heading", { name: "实现进展", exact: true }) });
+  await message.waitFor();
+  assert.equal(await message.locator("strong").filter({ hasText: "Markdown 渲染" }).count(), 1);
+  assert.equal(await message.locator("blockquote").count(), 1);
+  assert.equal(await message.locator("ol > li").count(), 2);
+  assert.equal(await message.locator("input[type=checkbox]:checked:disabled").count(), 1);
+  assert.equal(await message.locator("table tbody tr").count(), 2);
+  assert.equal(await message.locator("del").innerText(), "旧格式");
+  assert.ok(await message.locator(".hljs-keyword").count() > 0);
+  assert.equal(await message.getByRole("link", { name: "参考文档" }).getAttribute("target"), "_blank");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await message.getByRole("button", { name: "复制代码" }).click();
+  await message.getByText("已复制", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'const message = "READY";\nconsole.log(message);\n');
+  await message.locator("h2").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(output, "markdown.png"), animations: "disabled" });
+  await message.locator("table").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(output, "markdown-code.png"), animations: "disabled" });
+  const hostile = '[危险链接](javascript:alert(1))\n\n<script>window.__markdownXss = true</script>\n\n<img src="x" onerror="window.__markdownXss = true">';
+  const wideCode = "const longLine = '" + "x".repeat(500) + "';";
+  await page.getByLabel("创建 Agent", { exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill("Markdown 验证");
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("heading", { name: "Markdown 验证", exact: true }).waitFor();
+  await composer.fill("@"); assert.equal(await mentions.count(), 0);
+  await page.locator(".room-nav").filter({ hasText: "产品工作室" }).click();
+  await composer.fill("@ "); await composer.fill("@"); await mentions.waitFor();
+  assert.equal(await mentions.getByRole("option").count(), 2);
+  assert.equal(await mentions.getByRole("option").filter({ hasText: "Markdown 验证" }).count(), 0);
+  await page.locator(".nav-item").filter({ hasText: "Markdown 验证" }).click();
+  assert.equal(await mentions.count(), 0);
+  await page.getByLabel("输入消息").fill("**用户 Markdown**\n\n" + hostile + "\n\n```unknown-language\n" + wideCode);
+  await page.getByLabel("发送消息").click();
+  await page.locator(".user-message .prose strong").getByText("用户 Markdown", { exact: true }).waitFor();
+  assert.equal(await page.locator(".prose script, .prose img, .prose a[href^='javascript:']").count(), 0);
+  assert.equal(await page.evaluate(() => "__markdownXss" in window), false);
+  assert.equal(await page.locator(".prose pre").textContent(), wideCode + "\n");
+  await page.setViewportSize({ width: 850, height: 700 });
+  assert.ok(await page.locator(".prose pre").evaluate(el => el.scrollWidth > el.clientWidth));
+  assert.ok(await page.locator(".timeline").evaluate(el => el.scrollWidth <= el.clientWidth + 1));
+  await page.setViewportSize({ width: 1350, height: 900 });
+  await page.getByLabel("创建 Agent", { exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill("Quill");
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("heading", { name: "Quill", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "添加群成员" }).count(), 0);
+  await page.locator(".room-nav").filter({ hasText: "产品工作室" }).click();
+  const addMembers = page.getByRole("button", { name: "添加群成员" });
+  if (!(await addMembers.isVisible())) await page.getByRole("button", { name: "切换状态栏" }).click();
+  const originalReceipts = service.store.state.receipts.length;
+  await addMembers.click();
+  const memberDialog = page.getByRole("dialog", { name: "添加成员", exact: true });
+  assert.equal(await memberDialog.getByRole("checkbox").count(), 2);
+  assert.equal(await memberDialog.getByRole("checkbox", { name: "Atlas", exact: true }).count(), 0);
+  assert.equal(await memberDialog.getByRole("button", { name: "添加到群聊" }).isDisabled(), true);
+  await memberDialog.getByRole("checkbox", { name: "Quill", exact: true }).check();
+  await page.keyboard.press("Escape"); await memberDialog.waitFor({ state: "detached" });
+  assert.equal(service.store.state.rooms[0]!.members.length, 2);
+  assert.equal(await addMembers.isVisible(), true);
+  await addMembers.click();
+  await memberDialog.getByRole("checkbox", { name: "Quill", exact: true }).check();
+  await memberDialog.getByRole("checkbox", { name: "Markdown 验证", exact: true }).check();
+  await page.screenshot({ path: join(output, "add-members.png"), animations: "disabled" });
+  await memberDialog.getByRole("button", { name: "添加到群聊" }).click();
+  await memberDialog.waitFor({ state: "detached" });
+  await page.locator(".member strong").getByText("Quill", { exact: true }).waitFor();
+  assert.equal(service.store.state.rooms[0]!.members.length, 4);
+  assert.equal(service.store.state.receipts.length, originalReceipts);
+  await composer.fill("@Qu"); await mentions.getByRole("option").filter({ hasText: "Quill" }).waitFor();
+  await composer.press("Enter"); assert.equal(await composer.inputValue(), "@Quill "); await composer.fill("");
+  await addMembers.click();
+  await memberDialog.getByText(/所有 Agent 都已在群里/).waitFor();
+  assert.equal(await memberDialog.getByRole("button", { name: "添加到群聊" }).isDisabled(), true);
+  await memberDialog.getByRole("button", { name: "取消", exact: true }).click();
+  await page.reload(); await page.locator(".room-nav").filter({ hasText: "产品工作室" }).click();
+  await page.locator(".conversation-identity").getByText(/4 位成员/).waitFor();
+  await page.locator(".member strong").getByText("Quill", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "实现进展", exact: true }).waitFor();
+  await page.screenshot({ path: join(output, "room-members.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "◈ 工作台" }).click(); await page.screenshot({ path: join(output, "home.png"), animations: "disabled" });
+  await page.reload(); await page.getByRole("heading", { name: /让想法汇合/ }).waitFor();
+  const settingsButton = page.getByRole("button", { name: "设置", exact: true });
+  const settingsPosition = await settingsButton.boundingBox();
+  assert.ok(settingsPosition && settingsPosition.x < 250 && settingsPosition.y > 700);
+  await settingsButton.click();
+  const dialog = page.getByRole("dialog", { name: "模型设置" });
+  const apiUrl = dialog.getByLabel("API 地址", { exact: true });
+  const apiKey = dialog.getByLabel("API Key", { exact: true });
+  const model = dialog.getByLabel("模型名称", { exact: true });
+  const save = dialog.getByRole("button", { name: "保存配置" });
+  await apiUrl.fill("https://example.com/anthropic/");
+  assert.equal(await apiKey.getAttribute("type"), "password");
+  await apiKey.fill("fake-ui-test-key");
+  await dialog.getByRole("button", { name: "显示 Key" }).click();
+  assert.equal(await apiKey.getAttribute("type"), "text");
+  await model.fill("demo-model-v1"); await save.click();
+  await dialog.getByRole("status").waitFor();
+  assert.equal(await apiKey.inputValue(), "");
+  assert.equal(await apiKey.getAttribute("type"), "password");
+  assert.equal(await apiUrl.inputValue(), "https://example.com/anthropic");
+  await page.locator(".model-pill").getByText("demo-model-v1", { exact: true }).waitFor();
+  await page.keyboard.press("Escape"); await dialog.waitFor({ state: "detached" });
+  await settingsButton.click(); await dialog.getByText("API Key 已配置", { exact: true }).waitFor();
+  assert.equal(await apiKey.inputValue(), "");
+  assert.equal(await model.inputValue(), "demo-model-v1");
+  await model.fill("demo-model-v2"); await save.click(); await dialog.getByRole("status").waitFor();
+  await page.locator(".model-pill").getByText("demo-model-v2", { exact: true }).waitFor();
+  await page.screenshot({ path: join(output, "settings.png"), animations: "disabled" });
+  await apiUrl.fill("https://example.com/messages"); await save.click();
+  await dialog.getByRole("alert").waitFor();
+  assert.match(await dialog.getByRole("alert").innerText(), /基础地址/);
+  await apiUrl.fill("https://example.com/anthropic");
+  await dialog.getByLabel("清除 Key", { exact: true }).check();
+  await save.click(); await dialog.getByText("尚未配置 API Key", { exact: true }).waitFor();
+  await dialog.getByRole("button", { name: "关闭设置" }).click();
+  await page.reload(); await settingsButton.click();
+  await dialog.getByText("尚未配置 API Key", { exact: true }).waitFor();
+  assert.equal(await model.inputValue(), "demo-model-v2");
+  assert.equal(await apiKey.inputValue(), "");
+  await page.setViewportSize({ width: 850, height: 700 });
+  const dialogPosition = await dialog.boundingBox();
+  assert.ok(dialogPosition && dialogPosition.x >= 0 && dialogPosition.y >= 0 && dialogPosition.y + dialogPosition.height <= 700);
+  assert.deepEqual(errors, []); console.log("UI_SMOKE_OK: 创建成员、私聊、群聊、@、任务、刷新恢复，Markdown/高亮/复制/窄屏/HTML 与链接处理；设置入口、保存/保留/清除 Key、地址校验与重新打开；群成员多选添加、取消、@ 与刷新恢复；无浏览器异常。");
+} finally { await browser.close(); await service.close(); await rm(dir, { recursive: true, force: true }); }

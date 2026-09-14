@@ -1,0 +1,63 @@
+.prose {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.85;
+  color: #35483d;
+}
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose p { margin: 0 0 12px; white-space: normal; }
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+  color: #203e30;
+  font-weight: 650;
+  line-height: 1.5;
+  margin: 24px 0 10px;
+  letter-spacing: -.02em;
+}
+.prose h1 { font-size: 23px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.prose h2 { font-size: 20px; }
+.prose h3 { font-size: 17px; }
+.prose h4, .prose h5, .prose h6 { font-size: 14px; }
+.prose strong { font-weight: 650; color: #264d38; }
+.prose a { color: #2d7053; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: #94b49d; }
+.prose a:hover { color: #17462f; text-decoration-color: currentColor; }
+.prose .markdown-path { text-decoration: underline dotted #a8b69f; text-underline-offset: 3px; }
+.prose ul, .prose ol { margin: 10px 0 14px; padding-left: 24px; }
+.prose li { margin: 4px 0; padding-left: 3px; }
+.prose li::marker { color: #6d8562; }
+.prose li > p { margin: 6px 0; }
+.prose li > ul, .prose li > ol { margin: 4px 0; }
+.prose .contains-task-list { list-style: none; padding-left: 4px; }
+.prose .task-list-item input { accent-color: var(--green); margin: 0 9px 0 0; vertical-align: middle; }
+.prose blockquote { margin: 16px 0; padding: 10px 16px; border-left: 3px solid #93ac7d; background: #eaf0e3; color: #62735b; border-radius: 0 6px 6px 0; }
+.prose blockquote > :last-child { margin-bottom: 0; }
+.prose hr { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
+.prose code { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: .88em; }
+.prose :not(pre) > code { padding: 2px 5px; background: #e8eddf; border: 1px solid #dce4d3; border-radius: 4px; color: #365c41; white-space: break-spaces; }
+.prose .code-block { margin: 16px 0; border: 1px solid #cdd9c5; border-radius: 9px; overflow: hidden; background: #f9fbf5; }
+.prose .code-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 13px; background: #e8efdf; border-bottom: 1px solid #d9e3d0; color: #627654; font: 10px "SFMono-Regular", Menlo, monospace; }
+.prose .code-toolbar button { padding: 4px 7px; border-radius: 4px; color: #48663e; font: 11px "Avenir Next", "PingFang SC", sans-serif; }
+.prose .code-toolbar button:hover { background: #d9e5cd; }
+.prose pre { margin: 0; padding: 16px; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; line-height: 1.7; tab-size: 2; }
+.prose pre code { display: block; font-size: 12px; color: #354638; white-space: pre; overflow-wrap: normal; }
+.prose .markdown-table { overflow-x: auto; max-width: 100%; margin: 16px 0; border: 1px solid #d6dfce; border-radius: 7px; overscroll-behavior-x: contain; }
+.prose table { border-collapse: collapse; min-width: 100%; font-size: 12px; line-height: 1.7; }
+.prose th, .prose td { padding: 9px 13px; border-bottom: 1px solid #e1e7da; border-right: 1px solid #e1e7da; text-align: left; min-width: 100px; }
+.prose th { background: #eaf0e2; color: #46643b; font-weight: 600; }
+.prose tr:nth-child(even) td { background: #f0f4e9; }
+.prose tr:last-child td { border-bottom: 0; }
+.prose th:last-child, .prose td:last-child { border-right: 0; }
+.prose .footnotes { font-size: 11px; color: #76826c; border-top: 1px solid var(--line); margin-top: 22px; }
+.prose .hljs-comment, .prose .hljs-quote { color: #8a9680; font-style: italic; }
+.prose .hljs-keyword, .prose .hljs-selector-tag, .prose .hljs-literal { color: #995441; }
+.prose .hljs-string, .prose .hljs-regexp, .prose .hljs-addition { color: #4e7a35; }
+.prose .hljs-title, .prose .hljs-section, .prose .hljs-built_in { color: #316e78; }
+.prose .hljs-number, .prose .hljs-symbol, .prose .hljs-attr { color: #a07532; }
+.prose .hljs-type, .prose .hljs-params, .prose .hljs-variable { color: #66588b; }
+.prose .hljs-meta, .prose .hljs-deletion { color: #b0644b; }
+.inspector .prose { font-size: 11px; }
+.inspector .prose h1, .inspector .prose h2, .inspector .prose h3 { font-size: 14px; }
+.inspector .prose strong { display: inline; font-size: inherit; margin: 0; }
+.inspector .prose pre { padding: 10px; }
+.inspector .prose pre code { font-size: 10px; }
