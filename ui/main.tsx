@@ -70,7 +70,7 @@ function App() {
   const timeline = [...messages.map(m => ({ at: m.at, message: m, activity: null })), ...activities.map(a => ({ at: a.at, activity: a, message: null }))].sort((a, b) => a.at.localeCompare(b.at));
   const members = room ? state?.agents.filter(a => room.members.includes(a.id)) ?? [] : agent ? [agent] : [];
   const inspectionAgent = agent ?? members.find(a => a.id === inspectionAgentId) ?? members[0];
-  const name = (id: string) => id === "user" ? "你" : state?.agents.find(a => a.id === id)?.name ?? "Agent";
+  const name = (id: string) => id === "user" ? "你" : state?.agents.find(a => a.id === id)?.name ?? "已删除的 Agent";
   useEffect(() => { followLatest.current = true; end.current?.scrollIntoView({ behavior: "instant" }); }, [selected]);
   const contentVersion = messages.map(m => `${m.id}:${m.text.length}`).join("|");
   useEffect(() => { if (followLatest.current) end.current?.scrollIntoView({ behavior: "instant" }); }, [contentVersion, runningAgents.join("|"), activities.length]);
@@ -123,7 +123,13 @@ function App() {
           <button className="back-to-chats" aria-label="返回会话列表" onClick={() => select("")}>‹</button>
           {room ? <GroupAvatar tones={room.members.map(tone)} /> : <AgentAvatar tone={tone(selected)} />}
           <div className="conversation-identity"><h2>{room?.name ?? agent?.name}</h2><p>{room ? `${room.members.length} 位成员` : statusLabel[agent?.status ?? "idle"]}</p></div>
-          <div className="conversation-actions">{agent && <button className="toggle" onClick={() => setSkillsAgentId(agent.id)}>Skills</button>}<button className={`toggle ${showActivity ? "on" : ""}`} aria-pressed={showActivity} onClick={() => setShowActivity(!showActivity)}>工具活动</button><button ref={inspectorToggle} className={`info-toggle ${inspectorOpen ? "on" : ""}`} title="会话详情" aria-label="切换状态栏" aria-expanded={inspectorOpen} aria-controls="conversation-inspector" onClick={() => setInspectorOpen(!inspectorOpen)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div>
+          <div className="conversation-actions"><button className="toggle delete-conversation" disabled={busy} onClick={() => {
+            const title = room ? "群聊" : "Agent";
+            const detail = room ? "将删除群消息、任务及草稿，群成员本身不受影响。" : "将删除私聊记录并退出所有群聊，其他群中的历史发言保留。";
+            if (window.confirm(`删除${title}“${room?.name ?? agent?.name}”？\n${detail}工作目录、共享 Skills 和 SDK 原始文件保留。此操作不可撤销。`)) {
+              void action(async () => { await command(room ? "room.delete" : "agent.delete", { id: selected }); select(""); });
+            }
+          }}>{room ? "删除群聊" : "删除 Agent"}</button>{agent && <button className="toggle" onClick={() => setSkillsAgentId(agent.id)}>Skills</button>}<button className={`toggle ${showActivity ? "on" : ""}`} aria-pressed={showActivity} onClick={() => setShowActivity(!showActivity)}>工具活动</button><button ref={inspectorToggle} className={`info-toggle ${inspectorOpen ? "on" : ""}`} title="会话详情" aria-label="切换状态栏" aria-expanded={inspectorOpen} aria-controls="conversation-inspector" onClick={() => setInspectorOpen(!inspectorOpen)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div>
         </div>
         <div className="timeline" onScroll={e => { const el = e.currentTarget; followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
           {!timeline.length && <div className="empty-conversation"><span>{room ? "#" : "◇"}</span><h3>{room ? "一个新的协作起点" : `与 ${agent?.name} 开始对话`}</h3><p>{room ? "提出目标，或 @ 某位成员。工具活动将在这里展开。" : "这里的对话保留在这个 Agent 的独立会话中。"}</p></div>}

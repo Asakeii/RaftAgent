@@ -98,7 +98,9 @@ export class Store {
     return input;
   }
   delegationResult(s: AppState, input: Input, runId: string, text: string) {
-    if (!input.replyToAgentId) return;
+    if (!input.replyToAgentId || !s.agents.some(a => a.id === input.replyToAgentId)) return;
+    const destination = input.returnChannel ?? input.replyToAgentId;
+    if (!s.agents.some(a => a.id === destination) && !s.rooms.some(r => r.id === destination)) return;
     const id = `delegation:${runId}`;
     if (s.messages.some(m => m.id === id)) return;
     const child = s.agents.find(a => a.id === input.agentId)!;
@@ -125,6 +127,45 @@ export class Store {
       const userOnly = () => { if (actor.kind !== "user") throw new DomainError("仅用户可执行"); };
       let result: unknown;
       switch (command.name) {
+        case "agent.delete": case "room.delete": {
+          userOnly();
+          const id = required(a.id, "ID");
+          const deletingAgent = command.name === "agent.delete";
+          const target = deletingAgent ? s.agents.find(x => x.id === id) : s.rooms.find(x => x.id === id);
+          if (!target) throw new DomainError("删除对象不存在");
+          if (s.runs.some(r => r.status === "running" && (deletingAgent ? r.agentId === id : r.channel === id))) throw new DomainError("请先停止相关运行，等待结束后再删除");
+          const removedMessages = new Set(s.messages.filter(m => m.channel === id || (deletingAgent && m.internalFor === id)).map(m => m.id));
+          s.messages = s.messages.filter(m => !removedMessages.has(m.id));
+          s.receipts = s.receipts.filter(r => !removedMessages.has(r.messageId) && (!deletingAgent || r.agentId !== id));
+          s.inputs = s.inputs.filter(i => i.channel !== id && (!deletingAgent || i.agentId !== id));
+          for (const input of s.inputs) {
+            if (input.returnChannel === id || (deletingAgent && input.replyToAgentId === id)) {
+              delete input.replyToAgentId; delete input.returnChannel;
+            }
+          }
+          s.runs = s.runs.filter(r => r.channel !== id && (!deletingAgent || r.agentId !== id));
+          s.activities = s.activities.filter(x => x.channel !== id && (!deletingAgent || x.agentId !== id));
+          s.sessions = (s.sessions ?? []).filter(x => x.channel !== id && (!deletingAgent || x.agentId !== id));
+          s.drafts = s.drafts.filter(x => x.roomId !== id && (!deletingAgent || x.agentId !== id));
+          s.tasks = s.tasks.filter(x => x.roomId !== id);
+          for (const key of Object.keys(s.sceneNotices ?? {})) {
+            const [agentId, channel] = JSON.parse(key) as string[];
+            if (channel === id || (deletingAgent && agentId === id)) delete s.sceneNotices![key];
+          }
+          delete s.notices[id];
+          if (deletingAgent) {
+            s.agents = s.agents.filter(x => x.id !== id);
+            for (const child of s.agents) if (child.parentAgentId === id) delete child.parentAgentId;
+            for (const room of s.rooms) if (room.members.includes(id)) {
+              room.members = room.members.filter(member => member !== id); delete room.memberSince?.[id]; room.version++;
+            }
+            for (const task of s.tasks) if (task.owner === id) {
+              task.owner = null; if (task.status !== "done") task.status = "pending"; task.version++;
+            }
+          } else s.rooms = s.rooms.filter(x => x.id !== id);
+          this.event(s, command.name, `已删除 ${target.name}`);
+          result = { status: "deleted", id }; break;
+        }
         case "agent.create": {
           if (s.agents.length >= 12) throw new DomainError("本地版本最多 12 个 Agent");
           const parent = actor.kind === "agent" ? s.agents.find(x => x.id === actor.agentId)! : undefined;

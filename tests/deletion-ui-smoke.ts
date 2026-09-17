@@ -1,0 +1,36 @@
+import { chromium } from 'playwright';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { startService } from '../src/server.js';
+import type { Agent } from '../src/contracts.js';
+const dir = await mkdtemp(join(tmpdir(), 'raft-delete-ui-'));
+const service = await startService(resolve('.'), dir, {});
+const browser = await chromium.launch({ channel: 'chrome', headless: true });
+try {
+  const exec = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: 'user' }, { name, args, requestId: randomUUID() });
+  const agent = exec('agent.create', { name: '删除测试成员', role: 'test' }) as Agent;
+  exec('room.create', { name: '删除测试群', members: [agent.id] });
+  const page = await browser.newPage();
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto(service.url);
+  await page.locator('.room-nav').click();
+  page.once('dialog', d => d.dismiss());
+  await page.getByRole('button', { name: '删除群聊', exact: true }).click();
+  assert.equal(service.store.state.rooms.length, 1);
+  page.once('dialog', d => d.accept());
+  await page.getByRole('button', { name: '删除群聊', exact: true }).click();
+  await page.getByRole('heading', { name: '从一段对话开始' }).waitFor();
+  assert.equal(service.store.state.rooms.length, 0);
+  await page.locator('.nav-item').filter({ hasText: '删除测试成员' }).click();
+  page.once('dialog', d => d.accept());
+  await page.getByRole('button', { name: '删除 Agent', exact: true }).click();
+  await page.getByRole('heading', { name: '从一段对话开始' }).waitFor();
+  assert.equal(service.store.state.agents.length, 0);
+  await page.reload();
+  await page.getByText('点击上方 ＋，添加第一位 Agent').waitFor();
+  assert.deepEqual(errors, []);
+  console.log('DELETE_UI_OK');
+} finally { await browser.close(); await service.close(); await rm(dir, { recursive: true, force: true }); }

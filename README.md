@@ -92,6 +92,10 @@ ANTHROPIC_BASE_URL=https://api.anthropic.com
 
 私聊与各群聊使用独立 SDK 会话，但这不代表信息完全隔离：群运行会获得该 Agent 的近期私聊背景，也可以按权限检索其他场景。同一个 Agent 的不同会话仍共享其工作目录。详情见[群聊上下文设计](docs/progressive-room-context-design.md)和[共享 inbox 与发言规则](docs/shared-group-inbox.md)。
 
+### 删除 Agent 和群聊
+
+打开对应会话，点击顶部的“删除 Agent”或“删除群聊”，确认后删除。正在运行的对象需先停止并等待执行结束。删除 Agent 会移除私聊和群成员关系，群内已有发言保留，未完成的负责任务恢复为待领取；删除群聊会移除该群消息、任务和草稿，成员本身保留。工作目录、共享 Skills、SDK 原始文件与独立执行日志不随之清除。
+
 ### Skills 与联网搜索
 
 在 Agent 会话顶部的 **Skills** 面板选择该成员可用的能力。Agent 可以在工作目录中编写 Skill，通过本地 CLI 发布，并在发布成功后热加载。共享 Skill 的源码、发布版本及成员启用配置由应用统一管理，详见[共享 Skill 说明](docs/shared-skills.md)。
