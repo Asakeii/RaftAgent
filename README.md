@@ -1,237 +1,182 @@
 # RaftAgent
 
-基于 TypeScript、Claude Agent SDK、React 和 Electron 的多 Agent 本地助手。
+一个基于 Claude Agent SDK 的本地多 Agent 桌面助手。你可以为不同职责创建 Agent，单独交谈，也可以把它们放进同一个群聊，一起处理代码、资料和任务。
 
-每个 Agent 有独立身份、角色、工作目录和 SDK 会话；可以私聊，也可以加入共享群聊。通过 SDK 本地 Bash 调用 `raftctl` 协作，原生 Skill 按需说明命令用法；不接入 MCP。SDK 负责模型调用、工具执行、上下文管理和重试。
+项目使用 TypeScript、React、Electron 和 SQLite，目前主要面向 macOS 本地开发运行，尚未提供签名安装包。
 
-## 启动桌面助手
+## 功能
 
-完成下面的依赖安装后：
+- **私聊与群聊**：每个 Agent 的私聊和各群聊分别维护模型会话，支持历史记录、Markdown 和消息检索。
+- **多 Agent 协作**：共享群消息、成员提及、子任务委派，以及任务领取、提交和用户验收。
+- **明确的发言动作**：Agent 通过工具发送群消息，执行过程和结束说明不会自动混入聊天。发送时检查群版本，过时回复保留为待处理草稿。
+- **运行控制**：发消息自动唤醒成员；运行时输入框的发送按钮变为停止按钮。私聊支持流式输出，群聊合并展示成员运行状态。
+- **可扩展能力**：按成员启用 Skills，支持 Agent 编写、发布和热加载 Skill；可选 Tavily 联网搜索。
+- **执行详情**：查看模型会话、工具调用、授权请求、运行日志和用量估算。
+
+## 快速开始
+
+### 环境要求
+
+- Node.js **24 或更高版本**及 npm。
+- macOS：当前主要开发和验证平台。
+- Anthropic API Key，或支持 **Anthropic Messages 协议**的服务商凭据。
+
+SDK 安装时会通过可选依赖提供所需的 Claude Code 二进制文件，请勿省略可选依赖；常规安装无需另外安装 Claude Code。
+
+### 安装并启动
 
 ```bash
+git clone https://github.com/Asakeii/RaftAgent.git
+cd RaftAgent
+npm ci
 npm run desktop
 ```
 
-命令构建前后端并打开 Electron 窗口。当前是 macOS 开发启动版，依赖本机 Node.js 24+，尚未提供签名安装包。
+`npm run desktop` 会构建应用并打开 Electron 窗口。使用 nvm 的开发者也可以先执行 `nvm use`。
 
-1. 点击左下角「设置」，填写 API 地址、API Key 和模型名称并保存；然后点击「创建 Agent」，填写名称和职责，应用自动创建本地工作目录。
-2. 在独立会话中提交任务，SDK 保存会话；后续输入按 session ID 恢复。
-3. 创建协作空间并邀请成员，发送目标或输入 `@`，从当前群成员列表中选择 Agent。继续输入名字可筛选，↑/↓ 切换，Enter/Tab 选中，Esc 关闭；也可鼠标点击。普通消息也进入成员 inbox；活动记录不触发互相回复。
-4. 右侧可登记任务、查看成员状态、处理暂存草稿；群聊中点击「成员 → 添加成员」可多选已有 Agent 加入。新成员接收后续消息，历史记录可按需查看。修改文件及一般命令按 SDK 权限规则显示授权请求。
-5. 停止后新消息只保存，不自动唤醒。点击「继续」会检查当前状态，不直接重放旧命令。
+首次打开后：
 
-私聊、群聊、草稿和任务提交说明支持 Markdown：标题、粗体、引用、列表、任务列表、表格、行内代码与代码块。代码块提供常见语言高亮和复制按钮，宽表格与长代码在各自区域横向滚动。网页链接从桌面应用打开到系统浏览器；图片以链接显示，本地文件路径只展示。消息原文仍按文本保存。
+1. 打开左下角设置，填写 API Key、模型名称和 API 地址并保存。
+2. 创建 Agent，填写名称与职责；应用会为它创建工作目录。
+3. 在私聊中发送任务，或创建群聊、加入成员后发送消息。
+4. 需要停止时，点击输入框中的方形停止按钮；发送新消息可以再次唤醒成员。
 
-无 API Key 也可以管理成员、群聊和查看历史，但不会执行模型。设置保存后从下一次 Agent 执行生效，无需重启；正在运行的任务继续使用原配置。保存操作不测试服务连通性，也不会主动启动排队任务；提交消息或点击「继续」后按调度规则执行。
+未配置 API Key 时仍可管理成员、群聊和查看历史，但不会调用模型。保存模型设置不会测试连通性，新配置从下一次运行生效。
 
-也可运行本地网页界面：
+也可以使用浏览器界面：
 
 ```bash
 npm run web
 ```
 
-终端输出的启动 URL 包含本地访问凭据，请在自己的浏览器打开，不对外分享。
+在自己的浏览器打开终端输出的 URL。该地址包含本地访问凭据，不应分享给他人。桌面端和网页端不要同时使用同一数据目录启动服务。
 
-默认数据位于 `~/Library/Application Support/RaftAgent/raft.sqlite`，可通过 `RAFT_DATA_DIR` 指定。业务数据由本地服务单写，CLI 通过本地 Unix socket 访问。新建成员（含子 Agent）的工作目录为数据目录下的 `workspaces/<agent-id>/`，无需填写；已有成员保留原路径。SDK transcript 仍由 SDK 管理；只复制 SQLite 不等于复制完整模型会话。
+## 模型配置
 
-## 当前能力与边界
+桌面和网页端推荐使用应用内设置。API 地址应填写兼容服务的**基础地址**，不要填写 `/messages` 或 `/chat/completions` 完整请求地址。
 
-- 已实现：多 Agent 私聊、独立会话恢复、CLI 创建子 Agent 与异步委派、群聊、inbox 与显式确认、合并唤醒、工具活动、任务领取/提交/用户验收、held draft、停止、持久化与基础恢复。
-- 任务提交进入「待验收」，由用户核验产物后确认完成；尚未自动运行测试并绑定产物版本。Agent 自述不等于验证通过。
-- 首版使用 SQLite 中的一个原子 JSON 状态记录，适合本地小规模验证；最多 12 个身份、3 个并发运行，每轮 16 turns / $2 SDK 预算，连续 30 次运行后暂停，用户继续可重置次数。供应商实际计费以其账单为准。
-- 正常重启保留历史并让成员停止，用户明确继续后恢复调度。异常退出的旧输入标记未知，不自动重放；遗留 `service.lock` 会阻止另起实例，核验旧进程与外部操作已停止后再手动移除锁。
-- 已发出的外部操作不保证随停止回滚。角色说明和 cwd 不是强文件沙箱，同一 OS 用户下的 CLI 凭据也不是对恶意代码的隔离边界。
-- 尚未实现：争议全员暂停/固定快照/投票答询、多写入者工作区隔离、安装包签名与分发。这些仍保留在后续设计中。
+| 配置 | 说明 |
+| --- | --- |
+| API Key | 服务商提供的密钥 |
+| API 地址 | Anthropic 官方服务为 `https://api.anthropic.com`，其他服务按其文档填写 |
+| 模型 | 模型名称或服务商要求的推理接入点 ID |
 
-## 安装
+应用设置优先于环境变量和 `.env`。Key 保存在数据目录的 `llm-settings.json`，文件权限为 `0600`，目前是本地明文存储，未接入系统钥匙串。设置中留空 Key 会保留已有值；清除需使用“清除 Key”。
 
-需要 Node.js 24+ 和 npm。使用 nvm 时可执行 `nvm use`。
-
-```bash
-npm ci
-```
-
-SDK 通过可选依赖提供本地 Claude Code 二进制文件，请保留可选依赖。常规安装无需另外安装 Claude Code。
-
-## 配置
-
-桌面和网页端推荐通过左下角「设置」配置。API Key 默认隐藏，保存后不回显；留空保留现有 Key，勾选「清除 Key」后保存会移除它。切换 API 地址时需重新填写 Key 或明确清除。
-
-设置保存在数据目录的 `llm-settings.json`，优先于环境变量和 `.env`，不会改写项目 `.env`。Key 与聊天数据库分开保存，文件权限为 `0600`（仅当前系统用户可读写），当前为本地明文文件，未使用系统钥匙串加密。清除已保存的 Key 不会重新启用 `.env` 中的旧 Key。
-
-尚未保存应用设置时，沿用环境变量和 `.env`。原有单次任务 CLI 仍使用环境配置，不读取桌面设置文件。首次使用且项目中没有 `.env` 时：
+尚未保存应用设置时，也可以通过项目根目录的 `.env` 配置：
 
 ```bash
 cp .env.example .env
 ```
 
-在 `.env` 中配置服务商信息：
+使用 Anthropic 官方服务的示例：
 
 ```dotenv
-ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/compatible
-ANTHROPIC_API_KEY=你的火山方舟APIKey
-ANTHROPIC_MODEL=你的模型ID或推理接入点ID
+ANTHROPIC_API_KEY=your-api-key
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+# 可选：指定账号可用的模型
+# ANTHROPIC_MODEL=your-model-id
 ```
 
-Claude Agent SDK 使用 Anthropic Messages 协议。`ANTHROPIC_BASE_URL` 必须是兼容接口的基础地址，不能是 `/chat/completions` 或 `/messages` 完整接口。火山方舟必须填写模型 ID 或推理接入点 ID；实际模型和接口支持情况以服务商为准。
+`.env.example` 另提供火山方舟兼容地址示例，使用时需填写已开通的模型或接入点 ID。模型及协议支持情况以服务商为准。已有环境变量优先于 `.env`，模型调用会产生 API 用量。
 
-使用 Anthropic 官方服务时，只需填写 `ANTHROPIC_API_KEY`；删除或留空 `ANTHROPIC_BASE_URL` 后使用 `https://api.anthropic.com`，`ANTHROPIC_MODEL` 可选。
+## 使用说明
 
-程序使用 `dotenv` 加载项目根目录的 `.env`，已有环境变量优先。项目沿用本地 `.env`，无需重新填写。模型调用会产生 API 用量。
+### 群聊协作
 
-## Tavily 联网搜索
+在群聊中输入 `@` 可以选择成员，但普通消息也会唤醒群成员评估是否需要参与。用户的问候、提问和不完整需求都可以被回应；已有成员充分回答后，其他成员应避免重复接话。
 
-应用内置 `raft:tavily-search` Skill。可以直接对 Agent 说：「联网搜索 Claude Agent SDK 的最新官方文档，给出来源链接。」Agent 加载 Skill 后使用本地 Bash → raftctl → 宿主 Tavily 服务，不接 MCP，不依赖模型供应商的原生 WebSearch 权限。
+群聊只有一份共享消息历史。Agent 通过 `raftctl room send` 显式发言，普通模型输出保存在执行详情中。多名成员同时回复时，服务会检查它们依据的群版本：版本过期的回复成为草稿，Agent 可以修改、重试或丢弃。群消息成功提交后整体显示，私聊则保留流式展示。
+
+右侧状态栏可以查看成员、添加成员、管理任务和处理草稿。任务提交后由用户核验产物并验收；“Agent 已结束运行”不等于“任务已完成”。
+
+私聊与各群聊使用独立 SDK 会话，但这不代表信息完全隔离：群运行会获得该 Agent 的近期私聊背景，也可以按权限检索其他场景。同一个 Agent 的不同会话仍共享其工作目录。详情见[群聊上下文设计](docs/progressive-room-context-design.md)和[共享 inbox 与发言规则](docs/shared-group-inbox.md)。
+
+### Skills 与联网搜索
+
+在 Agent 会话顶部的 **Skills** 面板选择该成员可用的能力。Agent 可以在工作目录中编写 Skill，通过本地 CLI 发布，并在发布成功后热加载。共享 Skill 的源码、发布版本及成员启用配置由应用统一管理，详见[共享 Skill 说明](docs/shared-skills.md)。
+
+联网搜索使用内置的 `raft:tavily-search` Skill，需要单独配置 Tavily Key。启动应用前可设置 `TAVILY_API_KEY`；也支持数据目录中的 `tavily-settings.json`。当前模型设置面板不管理该 Key。搜索和网页提取可能消耗 Tavily credits，配置方式见 [Tavily Skill](resources/raft-plugin/skills/tavily-search/SKILL.md)。
+
+### 工具权限
+
+文件修改和命令执行遵循 SDK 权限规则。设置中的 **YOLO** 模式会自动批准普通工具操作，请仅在信任任务和工作环境时开启。
+
+Bash 使用 SDK 原生沙箱，禁止无沙箱回退；YOLO 不会关闭该沙箱。工作目录不是文件系统隔离边界，Read/Edit/Write 仍使用 SDK 权限系统。停止运行不会自动撤销已经执行的文件修改或外部操作。
+
+### 单次命令行任务
+
+无需桌面界面，也可以在项目目录运行一个只读任务：
 
 ```bash
-raftctl web search --query 'Claude Agent SDK 官方文档' --limit 5 --json
-raftctl web search --query 'Node.js release' --domains nodejs.org --time-range month --json
-raftctl web fetch --url 'https://platform.claude.com/docs/en/agent-sdk/overview' --max-chars 12000 --json
+npm run dev -- "读取 src/agent.ts，解释执行流程"
+npm run dev -- --help
 ```
 
-这些命令在活动 Agent 的 Bash 中使用。默认 basic 搜索，返回标题、URL 和摘要；正文通过 Tavily basic extract 按需读取。搜索最多 10 条，正文最多 30000 字符，truncated 表示被截断。搜索和提取均可能消耗 Tavily credits，返回可用的 usage 信息；不自动重试，不把空结果或抓取失败当作已有证据。
+单次 CLI 使用环境变量和 `.env`，不读取桌面模型设置，默认开放 Read、Glob、Grep。按 `Ctrl+C` 取消执行。
 
-Key 保存在应用数据目录下的 `tavily-settings.json`（`version: 1`、`apiKey` 两个字段），文件权限应为 `0600`；没有该文件时使用启动环境的 `TAVILY_API_KEY`。这是本机明文配置，未使用系统钥匙串。Key 不写进 Skill、源码或 CLI 参数，也不注入桌面 SDK/Bash 环境。每次请求重新读取配置，轮换 Key 无需重启；当前设置面板仍只管理 LLM 配置。
+`raftctl` 则是桌面服务为活动 Agent 提供的协作入口，运行身份由宿主注入；它与上述单次任务 CLI 用途不同。完整命令见[协作 Skill](resources/raft-plugin/skills/raft-collaboration/SKILL.md)。
 
-首次更新应用后需重新启动服务以加载新的 CLI 命令。新一轮 Agent 会话会发现基础插件里的 Skill。完整使用说明见 [Tavily Skill](resources/raft-plugin/skills/tavily-search/SKILL.md)。
+## 数据与常见问题
 
-## Agent 自主创建子 Agent
-
-在桌面成员的对话中提出需要拆分的任务，例如：「创建一个测试审查员，检查登录模块的测试遗漏，把结果汇总给我。」当前 Agent 可以加载协作 Skill，通过本地 Bash 执行：
-
-```bash
-raftctl agent create --name '测试审查员' \
-  --system-prompt '你负责检查测试覆盖与边界情况，报告实际证据。' \
-  --task '阅读登录模块与测试，列出三个最重要的遗漏。' \
-  --request-id create-reviewer-001 --json
-```
-
-返回的 `data.id` 是子 Agent ID。带 `--task` 自动排队执行；不带则创建空闲成员。长提示词可用 `--system-prompt-file PATH`，任务可用 `--task-file PATH`；`-` 表示从 stdin 读取。
-
-```bash
-raftctl agent list --json
-raftctl agent status --id CHILD_ID --json
-raftctl agent send --id CHILD_ID --task '进一步核验第二项问题。' --request-id followup-001 --json
-```
-
-子 Agent 拥有独立持久会话和自动创建的工作目录，沿用应用工具策略，并显示在桌面成员列表。它收到明确的任务文本，不自动获得父会话历史。`--room ROOM_ID` 可让新成员加入创建者已有权限的群聊。
-
-子任务完成或失败后，宿主自动将结果写入父 Agent inbox，父 Agent 可被唤醒继续汇总；无需轮询。停止的成员不会自动恢复。父子生命周期独立，停止父 Agent 不会一并停止子 Agent。
-
-`raftctl` 的路径和当前运行凭据由桌面运行时注入，仅供活动 Agent 的 Bash 使用；普通终端和原有单次 CLI 不具备该身份。写入重试应复用原 `request-id`。完整用法见 [子 Agent Skill 说明](resources/raft-plugin/skills/raft-collaboration/references/agents.md)。
-
-## Agent 自编写与热加载 Skill
-
-Agent 可用本地 Write/Edit 在自己的工作目录中编写 `SKILL.md` 及配套脚本，再通过 CLI 发布。发布成功后使用 SDK 原生 `Query.reloadSkills()` 刷新**当前运行实例**，无需重启应用或结束本轮。
-
-```bash
-raftctl skill publish --source ./skill-drafts/count-lines --request-id publish-001 --json
-raftctl skill list --json
-raftctl skill reload --json
-raftctl skill remove --name count-lines --request-id remove-001 --json
-```
-
-发布返回 `active=true`、`refresh.status=loaded` 后，Agent 可立即用原生 Skill 工具调用返回的 `raft-local:count-lines`。刷新失败时返回 `pending`，发布文件仍保留，可单独 `skill reload`；`request status` 只证明持久发布状态。修改草稿后需用新 request-id 再次发布，重试原 ID 不会偷偷替换版本。
-
-每个 Agent 只加载自己的发布目录，父子也不自动共享。已发布 Skill 随会话保留，原始草稿修改不直接影响发布文件。发布包只含 Skill 与脚本/参考/资产，不接入 MCP，不改变原有工具授权。移除不清除已读上下文或终止运行中的命令，历史版本文件暂不自动回收。完整格式、示例及限制见 [Skill 热加载说明](resources/raft-plugin/skills/raft-collaboration/references/skills.md)。
-
-## 原有单次 CLI
-
-开发运行：
-
-```bash
-npm run dev -- "用三句话介绍一下你自己"
-npm run dev -- "读取 src/agent.ts，解释这个 Agent 的执行流程"
-```
-
-编译后运行：
-
-```bash
-npm run build
-npm start -- "介绍一下当前项目"
-```
-
-`npm run dev -- --help` 查看帮助。请用引号传入一个非空任务。无论从哪个目录启动入口，Agent 工作目录与 `.env` 路径均固定为项目根目录。
-
-按 Ctrl+C 通过 SDK 的 `abortController` 取消执行，结束时通过 `Query.close()` 清理子进程。退出码：成功为 `0`，配置或执行失败为 `1`，参数错误为 `2`，用户中断为 `130`。
-
-## 工具与设置
-
-- 原有单次 CLI 只开放 `Read`、`Glob`、`Grep`。桌面运行时增加 SDK 内置 `Edit`、`Write`、`Bash`、`Skill`，保留权限回调；协作 CLI 与只读工具按配置预批准。
-- `settingSources: []` 不加载用户、项目和本地 Claude Code 设置文件。SDK 的托管策略仍按官方规则生效。
-- `strictMcpConfig: true` 和空 `mcpServers` 避免自动接入项目 `.mcp.json`、用户或插件中的 MCP 服务。项目 `.mcp.json` 可供开发工具使用，不会被本应用加载。
-- 应用显式加载 `resources/raft-plugin` 和当前 Agent 的托管 Skill 插件；两者均使用 `skipMcpDiscovery`，不包含 MCP。使用 `skills: 'all'` 接纳目录中的新增 Skill，同时关闭 bundled skills、保持 `settingSources: []`，避免固定名称过滤阻止热加载。模型看到的协作入口是 `raftctl`。
-- 提示词要求不读取凭证。工作目录和提示词均不是文件系统安全沙箱，当前实现不提供敏感文件的强制隔离。
-
-## 项目结构
-
-多 Agent 功能的已确认要求、分叉讨论方案与待决策边界维护在 [本地多 Agent 协作设计](docs/multi-agent-design.md)。后续开发需先对齐该文档，并按 [agent.md](agent.md) 核查 SDK 能力；文档中的候选方案不代表已经确定或实现。
-
-相关开源项目的源码、测试与复用边界见 [多 Agent GitHub 项目调研](docs/multi-agent-github-research.md)。调研建议与已确认设计分开维护。
+macOS 默认数据目录：
 
 ```text
-src/
-  cli.ts          单次运行 / serve / ctl 输入输出
-  config.ts       配置校验和 SDK Options
-  model-settings.ts 本地模型设置持久化、校验与 Key 脱敏
-  agent.ts        SDK 单次与流式会话执行
-  runtime.ts      单实例调度、Hooks、权限请求、session 关联
-  store.ts        显式状态转换、命令幂等、SQLite 持久化
-  server.ts       本地 HTTP UI 与 Unix socket 命令服务
-  control.ts      raftctl 参数与本地连接
-  skills.ts       Skill 发布校验、版本文件、持久登记、SDK 热刷新
-  tavily.ts       Tavily 搜索与正文提取、凭据读取、超时和结果规范化
-  desktop.ts      Electron 窗口与服务进程生命周期
-  launch.ts       使用 Node 24 启动桌面应用
-ui/               React 界面
-resources/        本地 Skill 及参考说明
-tests/            单元、服务集成、UI、Electron 与真实 SDK 验证
-agent.md          开发约定：实现前查文档，SDK 优先
-AGENTS.md         项目指令入口
+~/Library/Application Support/RaftAgent/
 ```
 
-## 验证
+可通过启动环境变量 `RAFT_DATA_DIR` 指定其他位置。聊天及应用状态保存在 `raft.sqlite`，执行日志在 `traces.sqlite`，Agent 工作目录在 `workspaces/`，共享 Skills 在 `skills/`。SDK 模型会话文件由 SDK 单独管理，备份 SQLite 并不等于备份完整模型会话。
+
+**提示“数据目录已被占用或上次未正常关闭”怎么办？**
+
+这是 `service.lock` 阻止同一数据目录被多个服务写入。先退出旧应用，并根据锁文件中的 PID 核实旧服务及相关工具进程是否仍在运行。只有确认它们已停止后，才移除提示路径中的 `service.lock` 并重新启动；不要删除数据库。SQLite 的 ExperimentalWarning 本身不是这个锁错误的原因。
+
+**停止或重启后如何继续？**
+
+重新发送消息即可唤醒相应成员。异常退出的旧运行会标为待核验，不自动重放；继续前应确认此前文件修改或外部操作的结果。
+
+**升级后为什么行为没变化？**
+
+代码更新后需要重启本地服务。内置 Skill 首次导入后由数据目录中的共享库维护，项目模板更新不会自动覆盖已导入的源码；已有安装需要同步相应 Skill 源码，再发布更新。
+
+**当前有哪些限制？**
+
+本项目仍处于开发阶段，适合本地小规模使用。目前最多 12 个 Agent、3 个并发运行；每轮限制为 16 个模型轮次和 2 美元 SDK 预算，连续运行 30 次后暂停，新用户消息会重置连续次数。费用是 SDK 估算，实际计费以服务商账单为准。成员是否发言由模型判断，不保证每次群消息都有固定数量的回复。
+
+## 开发与测试
 
 ```bash
 npm run check
 ```
 
-此命令依次执行前后端类型检查、无需 API Key 或网络的自动化测试，以及 TypeScript/Vite 构建。
+依次执行前后端类型检查、自动化测试和生产构建，无需付费模型 Key。
 
-```bash
-npm run smoke:ui       # Chrome 验证聊天、Markdown、模型设置与刷新；不调用模型
-npm run smoke:desktop  # Electron 启动、界面和退出清理（先 build）
-npm run smoke:live     # 使用 .env 的真实模型验证 Skill → Bash → CLI → 群消息 → 唤醒/恢复
-npm run smoke:subagents # 使用真实模型验证自主创建 → 独立子会话 → 结果回传与确认（先 build）
-npm run smoke:tavily   # 真实模型加载 Skill → Bash/CLI 搜索，并验证 Tavily 正文提取（先 build）
-npm run smoke:search-sdk # 当前桌面有效配置验证原生 WebSearch，会产生模型用量
-npm run smoke:skills-sdk # 真实 SDK 控制通道验证发布/更新/移除，无模型输入
-npm run smoke:skills-react # 本地模拟模型响应 + 真实 SDK，验证当前 ReAct 循环中发布与更新
-npm run smoke:skills-live # 真实模型同一轮自编写 → 发布 → 加载 → 本地脚本执行（先 build）
+常用命令：
+
+| 命令 | 用途 |
+| --- | --- |
+| `npm run build` | 构建 TypeScript 服务和前端 |
+| `npm test` | 运行自动化测试 |
+| `npm run smoke:ui` | Chrome 界面验证，不调用模型 |
+| `npm run smoke:context-ui` | 会话上下文界面验证 |
+| `npm run smoke:inspection` | 会话详情与执行日志界面验证 |
+| `npx tsx tests/chat-streaming-smoke.ts` | 私聊流式、群聊显式发送与停止验证 |
+| `npm run smoke:context-sdk` | 真实 SDK 配合本地模拟模型验证 |
+| `npm run smoke:live` | 使用真实模型验证协作链路，会产生 API 用量 |
+
+界面验证需先构建应用，并安装 Chrome。其他测试入口见 [package.json](package.json)；运行真实模型或 Tavily 测试前，请核实凭据及费用。测试截图与报告保存在 `.raft/`，不进入版本控制。
+
+### 项目结构
+
+```text
+src/          SDK 执行、调度、持久化、本地服务与协作 CLI
+ui/           React 桌面与网页界面
+resources/    内置 Skills、脚本与参考说明
+tests/        单元、服务集成、界面和 SDK 验证
+docs/         架构设计、实现说明与调研记录
+agent.md      开发约定
 ```
 
-真实验证会产生 API 用量，使用临时工作目录；结果报告路径由脚本输出。UI 截图保存在 `.raft/verification/`，不进入版本控制。
+SDK 负责模型调用、工具执行和会话管理；本项目负责消息、调度、版本检查、持久化及界面。Agent 通过 SDK 内置 Bash 调用本地 CLI 协作，当前不接入 MCP。
 
-## SDK 使用依据
-
-本实现对照[官方快速开始](https://code.claude.com/docs/zh-CN/agent-sdk/quickstart)、[TypeScript API 参考](https://code.claude.com/docs/zh-CN/agent-sdk/typescript)和安装版本的类型声明，使用 `query`、`Options`、`SDKMessage`、`abortController`、`Query.close()` 完成执行和生命周期管理。具体版本见 `package.json` 与 `package-lock.json`。
-
-自定义代码处理本地应用状态、会话调度、CLI 与 UI 集成，未重写 SDK Agent 循环或上下文管理。实现取舍、官方链接与验证记录见 [实现说明](docs/implementation.md)。新增能力前，继续按 [agent.md](agent.md) 核查 SDK 支持情况。
-
-[火山方舟 Messages API 文档](https://www.volcengine.com/docs/82379/2655179)
-
-## 会话详情与执行日志
-
-打开任意 Agent 的独立会话，在右侧状态栏切换「状态 / 会话详情 / 执行日志」。中间始终保留聊天和输入框，切换右侧 tab 不会清空草稿。顶部职责仅显示一行，完整内容可在「状态 → 职责说明」展开查看。点击「状态栏」可收起或展开右栏；窄窗口默认收起，展开后以侧边浮层显示，也可按 Esc 收起：
-
-- **会话详情**：使用 SDK 原生历史查询读取输入、模型输出、供应商返回的思考块，以及工具参数与结果。默认以紧凑摘要展示角色、时间、消息 ID 和工具标记，最新输入段在前、段内保持原顺序。支持选择已关联会话、每页 40 条记录、类型/失败筛选、本页搜索、批量展开/收起、工具调用与结果互相定位、复制消息 ID 或脱敏 JSON。每 3 秒刷新当前页；SDK 写入完整内容块后可见，不提供逐 token 的正文动画。
-- **执行日志**：显示排队数量和等待原因；新执行自动记录 SDK 初始化、模型开始返回、API 重试、上下文压缩、工具往返、授权等待与决定、执行结果和取消。可按级别或文本筛选，查看用量和 SDK 估算费用；详情每 2 秒增量读取，每批最多 200 条事件。
-- 新运行用输入 UUID 和 SDK 消息 UUID 关联 Run，可从历史详情跳转到对应执行。CLI 创建/委派子 Agent 时保留来源 Run，同一委派链的执行可以相互跳转。普通群聊合并唤醒暂不推算多来源 trace 关系。
-
-SDK 历史仍由 SDK 自己保存；本地执行日志另存于数据目录的 `traces.sqlite`，不写入聊天消息，也不会因查看日志而启动 Agent。旧运行没有采集的耗时、重试与用量不会事后补造。未收尾的日志在服务重启后标记「待核验」。日志独立于任务结果；日志写入失败会显示提示，不改变任务调度。
-
-这是基于 SDK 消息和 Hooks 的本地执行追踪，当前不启动 OTel Collector，也不导出到第三方服务。模型响应开始事件表示收到响应，不等于准确的 HTTP 发出时间；工具往返耗时包含授权等待。费用为 SDK 本地估算，第三方模型以服务商账单为准。
-
-记录只供本地用户认证接口读取，已知当前密钥和常见凭据字段会脱敏，二进制与签名不展开；长文本和过多条目有截断提示。原始 SDK 文件不被改写，原文件仍可能含工具处理过的敏感内容。日志目前持续保留，无自动清理。界面中的 JSON 是脱敏后的展示结构，不是完整 API 请求报文。
-
-验证命令：`npm run smoke:inspection`（先构建）。真实 SDK 与本地模拟模型的完整工具链验证包含在 `npm run smoke:skills-react`，无需外部模型 Key。
+开发前请阅读 [agent.md](agent.md)，新增能力先核对 [Claude Agent SDK 官方文档](https://code.claude.com/docs/en/agent-sdk/overview)与已安装版本。实现细节见[实现说明](docs/implementation.md)；[多 Agent 设计](docs/multi-agent-design.md)中的候选方案和调研内容不代表已实现功能。

@@ -1,8 +1,8 @@
 // 本地模拟模型响应，但使用真实 SDK 的 Write/Bash/Skill 和正在执行中的 reloadSkills。
 // 无外部模型依赖；用于验证控制通道不会与当前 Bash 调用互相等待。
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
@@ -11,6 +11,9 @@ import { runSession } from "../src/agent.js";
 import type { Agent } from "../src/contracts.js";
 
 const dir = await mkdtemp(join(tmpdir(), "raft-skills-react-"));
+// 使用工作目录和系统临时目录以外的临时目标，验证真实 OS 写入边界。
+const outside = await mkdtemp(join(homedir(), ".raft-sandbox-probe-"));
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 let steps: { name: string; input: Record<string, unknown> }[] = [];
 let requests = 0; const results: string[] = [];
 const loadedBodies = new Set<string>();
@@ -26,6 +29,14 @@ const provider = createServer(async (req, res) => {
       if (String(block.text).includes("SKILL_BODY_WAS_LOADED")) loadedBodies.add("v1");
       if (String(block.text).includes("SKILL_BODY_V2_LOADED")) loadedBodies.add("v2");
     }
+  }
+  // 正在等待模型响应时通过应用设置切换真实 Query，随后工具使用新模式。
+  if ([0, 5, 10].includes(requests)) {
+    const response = await fetch(`http://127.0.0.1:${service.port}/api/settings`, {
+      method: "POST", headers: { Authorization: `Bearer ${service.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${port}`, model: "claude-sonnet-4-5", yolo: requests !== 5 }),
+    });
+    assert.equal(response.status, 200, await response.text());
   }
   const step = steps[requests++];
   const id = `msg_${randomUUID()}`;
@@ -70,6 +81,11 @@ try {
     { name: "Skill", input: { skill: "raft-local:echo-local" } },
     { name: "Bash", input: { command: `node '${script}'` } },
   ];
+  steps.push(
+    { name: "Bash", input: { command: "printf SANDBOX_LOCAL_OK > sandbox-local.txt" } },
+    { name: "Bash", input: { command: `printf forbidden > ${quote(join(outside, "blocked.txt"))}` } },
+    { name: "Bash", input: { command: `printf forbidden > ${quote(join(outside, "escape.txt"))}`, dangerouslyDisableSandbox: true } },
+  );
   service.store.execute({ kind: "user" }, { name: "direct.send", args: { agentId: agent.id, text: "SDK_REACT_HOT_SKILL_PROBE" }, requestId: "run" });
   const start = Date.now();
   while (Date.now() - start < 45_000) {
@@ -78,25 +94,32 @@ try {
   }
   assert.equal(service.store.state.runs[0]?.status, "done", JSON.stringify(service.store.state.agents));
   assert.equal(queryCount, 1); assert.equal(sessions.length, 1);
-  assert.equal(requests, 11);
-  assert.deepEqual([...loadedBodies].sort(), ["v1", "v2"]);
+  assert.equal(requests, 14);
+  assert.deepEqual([...loadedBodies].sort(), ["v1", "v2"], JSON.stringify(results));
   assert.ok(results.some(r => r.includes('\\"status\\":\\"loaded\\"')), JSON.stringify(results));
   assert.ok(results.some(r => r.includes("REACT_SCRIPT_RESULT_42")), JSON.stringify(results));
   assert.ok(results.some(r => r.includes("REACT_SCRIPT_UPDATED_43")), JSON.stringify(results));
-  assert.ok(!results.some(r => r.includes('"is_error":true')), JSON.stringify(results));
+  assert.ok(!results.slice(0, 11).some(r => r.includes('"is_error":true')), JSON.stringify(results));
+  assert.equal(results.length, 13);
+  assert.ok(results.slice(11).every(r => r.includes('"is_error":true')), JSON.stringify(results));
+  assert.equal(await readFile(join(agent.workspace, "sandbox-local.txt"), "utf8"), "SANDBOX_LOCAL_OK");
+  assert.deepEqual(await readdir(outside), [], "越界写入和无沙箱重试均不能创建文件");
   const trace = service.traces.list(agent.id).runs[0]!;
   assert.equal(trace.status, "done"); assert.equal(trace.sessionId, sessions[0]);
   const traceEvents = service.traces.events(trace.id).events;
-  assert.equal(traceEvents.filter(e => e.kind === "tool.start").length, 10);
-  assert.equal(traceEvents.filter(e => e.kind === "tool.end").length, 10);
+  assert.equal(traceEvents.filter(e => e.kind === "tool.start").length, 13);
+  assert.equal(traceEvents.filter(e => e.kind === "tool.end").length, 11);
+  assert.equal(traceEvents.filter(e => e.kind === "tool.error").length, 2);
   assert.ok(traceEvents.some(e => e.kind === "model.response"));
   assert.ok(trace.turns && trace.usage);
   const history = await fetch(`http://127.0.0.1:${service.port}/api/agents/${agent.id}/history?limit=100`, { headers: { Authorization: `Bearer ${service.token}` } }).then(r => r.json());
   assert.ok(history.messages.some((m: { id: string; runId: string }) => m.id === trace.inputId && m.runId === trace.id));
   assert.ok(history.messages.filter((m: { role: string }) => m.role === "assistant" || m.role === "tool").every((m: { runId: string }) => m.runId === trace.id));
-  assert.equal(history.messages.flatMap((m: { blocks: { kind: string }[] }) => m.blocks).filter((b: { kind: string }) => b.kind === "tool_result").length, 10);
-  console.log("TRACE_SDK_OK: 真实 SDK 历史精确关联输入 Run，10 组工具往返，模型响应事件与用量均已采集。");
+  assert.equal(history.messages.flatMap((m: { blocks: { kind: string }[] }) => m.blocks).filter((b: { kind: string }) => b.kind === "tool_result").length, 13);
+  console.log("TRACE_SDK_OK: 真实 SDK 历史精确关联输入 Run，13 组工具往返，模型响应事件与用量均已采集。");
+  console.log("YOLO_OK: 真实 Query 在运行中开启、关闭、再开启；YOLO 下 Bash 仍不能越界或无沙箱重试。");
+  console.log("SANDBOX_OK: 工作目录可写，越界写入被拒，dangerouslyDisableSandbox 无法绕过；raftctl Socket 与 Skill 热加载正常。");
   console.log("SKILLS_REACT_OK: 本地模拟模型 + 真实 SDK；同一 Run 发布及更新、两次 Skill 正文加载、配套脚本输出 42/43");
 } finally {
-  await service.close(); await new Promise<void>(r => provider.close(() => r())); await rm(dir, { recursive: true, force: true });
+  await service.close(); await new Promise<void>(r => provider.close(() => r())); await rm(dir, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true });
 }

@@ -1,5 +1,25 @@
 # 本地助手 v0.1 实现记录
 
+## 设置页 YOLO 开关（2026-09-16）
+
+查阅官方 [SDK 权限](https://code.claude.com/docs/en/agent-sdk/permissions)，核对已安装 0.3.267 的 `allowDangerouslySkipPermissions` 与 `Query.setPermissionMode()`。沿用流式 Query，直接切换 `default` / `bypassPermissions`，不使用无条件放行的授权回调替代权限模式。
+
+应用级开关默认关闭，写入现有 llm-settings.json 的布尔 `yolo` 字段，旧文件缺少此字段时按关闭读取。设置 API 仅允许已认证用户调用，串行保存及切换以避免并发保存顺序错乱；切换失败时停止仍存活的受影响实例，并返回“已保存但部分运行已停止”的错误。后续 Query 从当前设置初始化权限模式，活动 Query 通过原生 setter 更新。已有授权请求保留，不自动替用户回答。
+
+UI 沿用设置页样式，以带可访问名称的 switch 展示，保存后生效，明确标注影响所有 Agent。模型配置仍是下一轮生效；YOLO 不改变 Bash 沙箱、Socket 白名单、停止 Hook 或业务命令鉴权。此开关不代表 Read/Edit/Write 获得 OS 沙箱保护。
+
+验证：`npm run check`、`npm run smoke:ui`、`npm run smoke:skills-react`。覆盖默认值、持久化、无效输入、活动切换、后续继承、失败停止、UI 开关保存和重开；本地模拟模型加真实 SDK 验证同一运行中开/关/再开，以及 YOLO 下沙箱仍阻止越界与无沙箱重试。
+
+## Bash 原生沙箱（2026-09-16）
+
+实现前查阅官方 [Bash 沙箱](https://code.claude.com/docs/en/sandboxing)，并核对本地 SDK 0.3.267 的 `Options.sandbox`、`SandboxSettings` 和 Bash `dangerouslyDisableSandbox` 类型。直接复用 SDK 原生 OS 沙箱，不另建命令执行层。
+
+桌面/网页 Scheduler 为所有 Agent 设置 `enabled: true`、`failIfUnavailable: true`、`allowUnsandboxedCommands: false`、空 `excludedCommands`；`autoAllowBashIfSandboxed: false` 保留现有工具授权。沙箱依赖不可用时失败，不静默降级。仅允许连接当前服务的 Unix socket，不开放全部 Socket。服务创建 Socket 时规范化临时目录真实路径，避免 macOS `/var` → `/private/var` 导致 Seatbelt 白名单不匹配。
+
+文件与网络范围沿用 SDK 默认沙箱策略。本次不增加每 Agent 的读取隔离、环境凭据屏蔽或容器；`Read/Edit/Write` 仍由 SDK 权限系统控制，宿主 Skill/Tavily 服务仍由应用校验。原单次 CLI 不开放 Bash，无需启动沙箱。已运行的服务需重启加载新配置。
+
+验证使用 `npm run check` 和 `npm run smoke:skills-react`。后者使用本地模拟模型与真实 SDK，在同一 Run 验证 Skill 发布/更新和 Socket 通信、工作目录写入成功、工作目录之外的临时目标写入失败，以及设置 `dangerouslyDisableSandbox: true` 仍无法越界写入；检查目标目录无文件，并验证日志记录两次失败。无需外部模型或 API 费用。
+
 日期：2026-09-14。此文描述已实现代码；此前设计稿仍包含后续功能，不等于全部已交付。
 
 ## SDK 核验与选型
@@ -91,9 +111,9 @@ SDK 原生 `agents` 配置配合 Agent 工具可执行子任务；本次需要�
 
 数据链路：Agent Write/Edit 编写工作目录内的草稿 → Bash/raftctl skill publish → socket 验证 Run 凭据 → SkillManager 校验并复制发布包 → 持久保存发布版本与幂等凭据 → 重建当前成员插件的 Skill 目录投影 → 调用**同一活动 Query** 的 reloadSkills → 检查发现列表与发布列表一致 → 将加载状态返回当前 Bash 工具结果。模型随后以 `raft-local:<name>` 调用原生 Skill，再通过 Bash 执行配套脚本。
 
-宿主为每个 Agent 提前加载一个独立空插件，避免会话启动后再增加未知插件目录。成员之间不共享私有插件。`skills: 'all'` 允许已加载目录中出现新名称；`settingSources: []` 与 `disableBundledSkills: true` 收窄发现来源。基础协作插件和私有插件均设置 skipMcpDiscovery，不开启新的 MCP 接入。
+宿主为每个 Agent 提前加载两个配置视图插件（raft 与 raft-local），避免会话启动后再增加未知插件目录。成员按 skillIds 从共享库选择能力；视图目录不含独立维护的源码。`skills: 'all'` 允许已加载目录中出现新名称；`settingSources: []` 与 `disableBundledSkills: true` 收窄发现来源。基础协作插件和私有插件均设置 skipMcpDiscovery，不开启新的 MCP 接入。
 
-版本文件放在 `<dataDir>/skills/<agent-id>/releases/<sha256>/`，完整写入 staging 后 rename，再把 PublishedSkill 和 request-id 写入 SQLite。托管插件 `plugin/skills/<name>` 以原子切换的符号链接指向发布版本。用户来源包不接受符号链接，宿主仅为受控投影生成链接。每轮 Query 启动前按持久记录修复投影，因此文件发布与数据库之间崩溃可能产生的孤立目录不会自行变为已发布 Skill。历史版本和 staging 暂不自动回收；此机制不是操作系统沙箱。
+版本文件放在 `<dataDir>/skills/releases/<skill-id>/<sha256>/`，源码在 `skills/sources/<skill-id>/`；完整写入 staging 后 rename，再把 SharedSkill、Agent 启用配置和 request-id 写入 SQLite。托管插件 `skills/views/<agent-id>/<plugin>/skills/<name>` 以原子切换的符号链接指向发布版本。用户来源包不接受符号链接，宿主仅为受控投影生成链接。每轮 Query 启动前按持久记录修复投影，因此文件发布与数据库之间崩溃可能产生的孤立目录不会自行变为已发布 Skill。历史版本和 staging 暂不自动回收；此机制不是操作系统沙箱。
 
 同一成员的管理命令串行处理，不阻塞其他成员。发布成功与 Query 加载成功分开返回：发布后刷新失败、超时或 Run 停止时，保留持久事实并返回 refresh.status=pending。原 request-id 重试保持原版本；已被新版本替换时 active=false。重试刷新不会恢复已停止的成员，也不会换一个 Query 冒充当前实例热加载。SDK 刷新设 8 秒超时，晚到的控制响应不再改写应用登记。request.status 查询发布凭据，不表示模型已加载或执行。
 
@@ -209,3 +229,26 @@ Key 独立保存到应用数据目录的 `tavily-settings.json`，本次以原�
 认证用户的 `room.members.add` 在单次状态事务内校验全部成员后做集合追加；普通 Agent 无此权限。沿用 requestId 幂等，重复添加不产生重复成员或额外版本变化；确有新增时房间版本递增一次，使旧成员快照的草稿继续经过新鲜度检查。成员关系与审计事件持久化，不修改成员的独立会话、工作目录或停止状态，不补投历史消息，不生成新待执行输入；后续群消息使用更新后的成员名单投递。历史消息仍可通过 room.changes 按权限查看。
 
 验证：`npm run check`（48 项自动化测试、前后端类型检查与构建）；新增用例覆盖仅用户可添加、无效成员整批拒绝、去重/重试、房间版本、成员状态保持、无历史补投及后续消息投递。`npm run smoke:ui` 覆盖多选、取消/Escape、过滤已有成员、全部已加入提示、@ 新成员与刷新恢复，截图保存在 `.raft/verification/add-members.png` 和 `room-members.png`。
+
+## 共享 Skill 维护（2026-09-17）
+
+已支持统一源码/发布库、每成员启用配置、用户界面发布源码修改和旧发布记录迁移。详见 [共享 Skill 设计与 SDK 核查](shared-skills.md)。
+
+## 按场景会话与渐进消息上下文（2026-09-17）
+
+用户已授权实现 [调研推荐](progressive-room-context-design.md)。实现前重新查阅 [SDK Sessions](https://code.claude.com/docs/en/agent-sdk/sessions)、[修改 system prompt](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts)、[Hooks](https://code.claude.com/docs/en/agent-sdk/hooks) 与 [Skills](https://code.claude.com/docs/en/agent-sdk/skills)，核对锁定版本 0.3.267 的 resume、UserPromptSubmit.additionalContext 和 autoMemoryEnabled 类型。复用 SDK 的恢复、Skill/Bash、工具结果历史和压缩；自定义范围是业务场景路由、消息查询与状态，不自行重建 SDK transcript。
+
+- `AppState.sessions` 保存 `(agentId, channel) → sdkSessionId`，`Run` 保存实际场景、session 和返回目的地。私聊与每个群首次运行创建干净 session，之后精确 resume；仍然每个 Agent 只运行一轮。
+- 稳定职责放 systemPrompt。`UserPromptSubmit` 每轮注入场景、触发消息 ID、私聊背景、当前群卡片/原文窗口及其它群目录；PostToolBatch 刷新变化，不依赖恢复时修改 systemPrompt。明确关闭 SDK auto-memory，避免同 cwd 下另一条隐式自动记忆路径；同 cwd 文件仍然共享。
+- 首版摘要为确定性的近期原文窗口：私聊最多 12 条/正文合计 6000 字符，当前群最多 6 条/3600 字符，标出来源 ID、版本、截断与省略数量。它不是模型提取的完整事实摘要，不承诺覆盖窗口外的旧要求；可以检索旧消息。未引入后台总结 Agent、向量数据库或模型生成缓存摘要。
+- 群触发按场景合并有界批次：最多 20 条、通常正文合计最多 24000 字符，单条当前触发即使更长也完整提供。@ 提升场景优先级，等待超过 30 秒的场景按最早到达优先。`sceneNotices` 只消费选中场景的批次，和 Agent 的显式已读确认分开；运行中其它群来消息只刷新目录，不吞掉其后续唤醒。
+- 群内 assistant 文本只进入该场景的 SDK 历史/trace，不写私聊，也不自动作为群公开发言。继续用 `room send` 的版本/held draft/request-id 流程公开消息。委派携带原始 returnChannel，结果是仅父 Agent 可通过消息 CLI 读取的内部消息，不显示成群公开消息或写入父私聊。
+- 新增 `room list/inspect`、`message list/search/context/get`。权限由活动 Run 身份和成员关系决定；private 仅当前身份自己的私聊，joined 不包含私聊或内部结果。中文短词用大小写不敏感字面匹配，空格词默认 AND、match=any 为 OR；按序号排序，不宣称语义检索。支持发送者、时间、未读/@ 过滤。消息分页绑定筛选和 snapshotSeq，ack 的 readAtSeq 保持分页快照语义；读取路径不 clone/写整个状态，也不触发调度。
+- list/context 单条最多 2000 字符，search 片段最多 400 字符，get 默认每段 12000、上限 24000 字符，通过 nextOffset 取全。兼容 inbox/room.changes 的 Agent 正文每条最多 1000 字符；inbox 默认当前场景。所有读取都不自动 ack；已投递证据在 SDK/trace 中，不另建一个假装能反映压缩后模型内存的“已加载表”。
+- 历史/trace API 默认只读私聊，通过 conversationId 显式读取群内范围。群右栏可选择成员查看本群详情和日志；内部消息不出现在聊天时间线。旧混合 SDK session 保留归档，可在私聊历史选择框中显式查看；不将旧混合历史 fork/resume 给新场景。旧消息保留并标记 legacyContext，默认不共享为私聊背景。旧未执行的混合 inbox 输入标未知，恢复后按各群待办调度。
+
+验证：`npm run check` 的类型检查、自动化测试与构建通过。新增自动化覆盖目录不含正文、跨群权限、中文 AND/OR、截断重读、稳定分页、不同场景 ack 与唤醒、私聊背景更新、新成员未读、委派回源、停止/继续、多群工具间通知、session 和 history/trace 范围以及持久化迁移。
+
+`npm run smoke:context-sdk` 使用本地模拟 Messages 服务和真实 SDK，完成私聊→群聊→私聊→群聊的交替恢复，验证动态 hook 确实进入模型请求、原生 Skill 和引用文件按需加载、Bash/CLI/Socket 检索成功、群中读取的跨群正文在本群 resume 保留而不混入私聊。`smoke:skills-react` 回归通过 Skill 热更新、真实工具往返、YOLO 切换与 Bash 越界/无沙箱回退拒绝。以上均未调用外部付费模型，不代表已验证模型自主检索质量或费用收益。
+
+`smoke:context-ui`、`smoke:ui`、`smoke:inspection` 通过真实 Chrome 的成员上下文切换、私聊范围、归档入口、日志、原有设置/共享 Skills、群聊与窄屏回归；界面截图 `.raft/verification/group-context.png` 和 `group-context-narrow.png` 是隔离展示样例。升级需重启本地服务并刷新界面，未自动重启用户正在使用的服务，也未清理旧历史。

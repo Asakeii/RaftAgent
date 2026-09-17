@@ -40,7 +40,7 @@ test("HTTP 身份与 socket 身份隔离，CLI 结果和消息可持久恢复", 
   assert.equal(reopened.store.state.messages.length, 1); assert.equal(reopened.store.state.agents[0]!.status, "error");
 });
 
-test("多消息合并唤醒，运行中不重复创建实例，用户停止后消息不能自动恢复", async t => {
+test("多消息合并唤醒，运行中不重复创建实例，用户停止阻断旧待办，新用户消息自动恢复", async t => {
   const dir = await mkdtemp(join(tmpdir(), "raft-scheduler-"));
   let running = 0, peak = 0, calls = 0; let finish: (() => void) | undefined;
   const service = await startService(resolve("."), dir, { ANTHROPIC_API_KEY: "test" }, async (_prompt, options, onMessage) => {
@@ -57,4 +57,7 @@ test("多消息合并唤醒，运行中不重复创建实例，用户停止后�
   assert.equal(peak, 1);
   command("agent.stop", { id: a.id }); service.scheduler.stop(a.id); finish?.();
   await new Promise(r => setTimeout(r, 30)); assert.equal(calls, 1); assert.equal(service.store.state.agents[0]!.status, "stopped");
+  command("room.send", { room: room.id, body: "重新开始" });
+  await new Promise(r => setTimeout(r, 30)); assert.equal(calls, 2);
+  assert.equal(peak, 1);
 });

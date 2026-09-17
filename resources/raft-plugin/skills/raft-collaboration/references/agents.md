@@ -21,14 +21,14 @@ raftctl agent list --json
 raftctl agent status --id CHILD_ID --json
 ```
 
-继续委派（恢复子 Agent 的既有 session）：
+继续委派（恢复子 Agent 在目标场景的 session；未指定 room 时为其独立会话）：
 
 ```bash
 raftctl agent send --id CHILD_ID --task '进一步核验第二项问题，给出具体文件位置。' --request-id followup-001 --json
 ```
 
-可加 `--room ROOM_ID` 绑定活动到父子双方都在的房间；不传则活动留在子 Agent 独立会话。用户已停止的子 Agent 只排队，必须由用户继续后才执行。
+可加 `--room ROOM_ID` 绑定活动到父子双方都在的房间；不传则活动留在子 Agent 独立会话。用户已停止的子 Agent 只排队，用户再次发消息后才重新唤起。
 
-每个明确委派的 Run 结束后，宿主把最终结果或失败通知写入父 Agent inbox，包含 inputId。使用 `raftctl inbox list --json` 读取并 `inbox ack` 确认；status 也提供最近五条委派结果。不会自动把子 Agent 其他私聊内容发给父 Agent，也不会把结果直接广播给整个群。
+每个明确委派的 Run 结束后，宿主把最终结果或失败通知写入父 Agent 发起委派的场景 inbox，包含 inputId。使用 `raftctl inbox list --json` 的 notifications 字段（群场景）或 messages 字段（私聊）读取并 `inbox ack` 确认；status 也提供最近五条委派结果。不会自动把子 Agent 其他私聊内容发给父 Agent，也不会把结果直接广播给整个群。
 
 收到创建结果后可继续其他工作或结束本轮等待异步通知，不要写 sleep/轮询占满并发名额。父 Agent 停止时通知照常入库但不自动恢复；父子是独立执行实例，停止父 Agent 不会自动撤销子 Agent 已发出的工作。

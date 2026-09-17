@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { pendingRoomMessages } from "../src/shared-inbox.js";
 import { Store } from "../src/store.js";
 import type { Actor, Agent, Room, Draft } from "../src/contracts.js";
 
@@ -21,15 +22,15 @@ function setup(t: test.TestContext) {
   };
   return { store, command, room, a, b, aa: actor(a.id), bb: actor(b.id) };
 }
-test("群消息只入接收者 inbox，读取不标读，精确确认不代表任务完成", t => {
-  const { store, command, room, aa, bb, a, b } = setup(t);
+test("群 inbox 共享同一份消息，包含自己的发言，ack 不删除共享内容", t => {
+  const { store, command, room, aa, bb } = setup(t);
   command("room.send", { room: room.id, body: "请审查", basedOn: 0 }, aa);
-  const result = command("inbox.list", {}, bb) as { messages: { id: string }[] };
-  assert.equal(result.messages.length, 1);
-  assert.equal(store.state.receipts.some(r => r.agentId === a.id), false);
-  assert.equal(store.state.receipts.find(r => r.agentId === b.id)!.read, false);
+  const result = command("inbox.list", {}, bb) as { messages: { id: string }[]; version: number };
+  assert.equal(result.messages.length, 1); assert.equal(result.version, 1);
+  assert.deepEqual(command("inbox.list", {}, aa), result);
+  assert.equal(store.state.receipts.length, 0);
   command("inbox.ack", { ids: [result.messages[0]!.id] }, bb);
-  assert.equal(store.state.receipts[0]!.read, true);
+  assert.deepEqual(command("inbox.list", {}, bb), result);
   assert.equal(store.state.tasks.length, 0);
 });
 test("过时草稿不会发布；重检仍可能 held，force 显式提交且不能二次提交", t => {
@@ -112,7 +113,9 @@ test("用户批量添加群成员：原子校验、幂等、版本推进，只�
   const stale = command("room.send", { room: room.id, body: "旧成员快照", basedOn: original.rooms[0]!.version }, aa) as { status: string };
   assert.equal(stale.status, "held");
   command("room.send", { room: room.id, body: "加入后的消息", mentions: [c.id] });
-  const received = store.state.receipts.filter(r => r.agentId === c.id);
-  assert.equal(received.length, 1);
-  assert.equal(store.state.messages.find(m => m.id === received[0]!.messageId)!.text, "加入后的消息");
+  const pending = pendingRoomMessages(store.state, c.id, store.state.rooms[0]!);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.text, "加入后的消息");
+  assert.equal(store.state.receipts.length, 0);
+
 });

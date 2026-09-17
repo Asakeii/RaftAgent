@@ -22,8 +22,8 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
 try {
   const agent = service.store.execute({ kind: 'user' }, { name: 'agent.create', args: { name: 'Atlas', role: '核对代码事实，记录执行证据。\n'.repeat(60) }, requestId: 'create' }) as Agent;
-  service.store.transact(s => { s.agents[0]!.sessionId = 'fixture-session'; s.messages.push({ id: 'chat-fixture', channel: agent.id, sender: agent.id, text: '## 项目梳理\n\n已核对模块入口，可以在右侧查看每轮记录和执行日志。', mentions: [], at }); });
-  service.traces.start({ id: 'run-ui-001', traceId: 'run-ui-001', agentId: agent.id, inputId: 'fixture-input', sessionId: 'fixture-session', channel: agent.id, kind: 'direct', prompt: '读取项目说明，梳理模块职责。', model: 'demo-model', baseUrl: 'https://example.com', startedAt: at, status: 'running', phase: '等待模型响应' });
+  service.store.transact(s => { s.sessions!.push({ agentId: agent.id, channel: agent.id, sdkSessionId: 'fixture-session' }); s.messages.push({ id: 'chat-fixture', channel: agent.id, sender: agent.id, text: '## 项目梳理\n\n已核对模块入口，可以在右侧查看每轮记录和执行日志。', mentions: [], at }); });
+  service.traces.start({ id: 'run-ui-001', traceId: 'run-ui-001', agentId: agent.id, inputId: 'fixture-input', sessionId: 'fixture-session', contextVersion: 1, channel: agent.id, kind: 'direct', prompt: '读取项目说明，梳理模块职责。', model: 'demo-model', baseUrl: 'https://example.com', startedAt: at, status: 'running', phase: '等待模型响应' });
   const observer = new RunObserver(service.traces, 'run-ui-001', []);
   observer.event('run.start', '开始执行');
   observer.message({ type: 'system', subtype: 'init', session_id: 'fixture-session', model: 'demo-model' } as SDKMessage);
@@ -42,6 +42,8 @@ try {
   assert.ok(header && header.height < 80, '长职责不应撑高会话顶部');
   assert.ok(chat && chat.height > 650, '主要高度留给聊天');
   assert.equal(await page.locator('main [role=tab]').count(), 0);
+  assert.equal(await page.locator('.inspector').count(), 0, '默认保留完整聊天空间');
+  await page.getByRole('button', { name: '切换状态栏' }).click();
   assert.equal(await page.locator('.inspector [role=tab]').count(), 3);
   await page.getByText('职责说明', { exact: true }).click();
   assert.ok((await page.locator('.agent-role').innerText()).length > 500);

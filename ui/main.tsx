@@ -4,10 +4,12 @@ import type { Snapshot, Agent, Room, Command } from "../src/contracts";
 import "./style.css";
 import { MessageContent as MarkdownMessage } from "./MessageContent";
 import { SettingsDialog } from "./SettingsDialog";
+import { SkillsDialog } from "./SkillsDialog";
 import { AddMembersDialog } from "./AddMembersDialog";
 import { MessageComposer } from "./MessageComposer";
 import { AgentHistory, AgentTraces } from "./AgentInspection";
 import "./conversation-layout.css";
+import { AgentAvatar, GroupAvatar } from "./Avatars";
 
 const token = location.hash.slice(1) || sessionStorage.getItem("raft-token") || "";
 sessionStorage.setItem("raft-token", token); history.replaceState(null, "", location.pathname);
@@ -18,12 +20,14 @@ async function api(path: string, data?: unknown) {
 }
 const statusLabel: Record<string, string> = { idle: "待命", running: "工作中", stopped: "已停止", error: "需要处理", pending: "待领取", working: "执行中", reviewing: "待验收", done: "已完成" };
 const time = (t: string) => new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-const avatar = (name: string) => name.slice(0, 1).toUpperCase();
 function App() {
+  const [skillsAgentId, setSkillsAgentId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot>(); const [selected, setSelected] = useState<string>("");
+  const [inspectionAgentId, setInspectionAgentId] = useState("");
   const [view, setView] = useState<"status" | "history" | "traces">("status"); const [selectedRun, setSelectedRun] = useState("");
-  const select = (id: string) => { setSelected(id); setView("status"); setSelectedRun(""); };
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.matchMedia("(min-width: 1101px)").matches);
+  const select = (id: string) => { setSelected(id); setInspectionAgentId(""); setView("status"); setSelectedRun(""); };
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const inspectorToggle = useRef<HTMLButtonElement>(null);
   const closeInspector = () => { setInspectorOpen(false); inspectorToggle.current?.focus(); };
   useEffect(() => {
@@ -33,7 +37,8 @@ function App() {
   }, [inspectorOpen]);
   const [text, setText] = useState(""); const [error, setError] = useState(""); const [online, setOnline] = useState(false);
   const [modal, setModal] = useState<"agent" | "room" | "task" | null>(null); const [busy, setBusy] = useState(false);
-  const [showActivity, setShowActivity] = useState(true); const end = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+  const [showActivity, setShowActivity] = useState(false); const end = useRef<HTMLDivElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memberRoomId, setMemberRoomId] = useState<string | null>(null);
   const revision = useRef(0);
@@ -58,12 +63,17 @@ function App() {
   }, []);
   const state = snapshot?.state;
   const room = state?.rooms.find(r => r.id === selected); const agent = state?.agents.find(a => a.id === selected);
-  const messages = state?.messages.filter(m => m.channel === selected) ?? [];
+  const messages = [...(state?.messages ?? []), ...(snapshot?.streamingMessages ?? [])].filter(m => m.channel === selected && !m.internalFor);
+  const running = state?.runs.filter(r => r.status === "running" && r.channel === selected) ?? [];
+  const runningAgents = [...new Set(running.map(r => r.agentId))];
   const activities = showActivity ? state?.activities.filter(a => a.channel === selected) ?? [] : [];
   const timeline = [...messages.map(m => ({ at: m.at, message: m, activity: null })), ...activities.map(a => ({ at: a.at, activity: a, message: null }))].sort((a, b) => a.at.localeCompare(b.at));
   const members = room ? state?.agents.filter(a => room.members.includes(a.id)) ?? [] : agent ? [agent] : [];
+  const inspectionAgent = agent ?? members.find(a => a.id === inspectionAgentId) ?? members[0];
   const name = (id: string) => id === "user" ? "你" : state?.agents.find(a => a.id === id)?.name ?? "Agent";
-  useEffect(() => { end.current?.scrollIntoView({ behavior: "smooth" }); }, [selected, messages.length, activities.length]);
+  useEffect(() => { followLatest.current = true; end.current?.scrollIntoView({ behavior: "instant" }); }, [selected]);
+  const contentVersion = messages.map(m => `${m.id}:${m.text.length}`).join("|");
+  useEffect(() => { if (followLatest.current) end.current?.scrollIntoView({ behavior: "instant" }); }, [contentVersion, runningAgents.join("|"), activities.length]);
   async function command(name: string, args: Record<string, unknown>) {
     setError(""); const c: Command = { name, args, requestId: crypto.randomUUID() };
     const r = await api("command", c); await refresh(); return r.data;
@@ -74,67 +84,87 @@ function App() {
     try { await command(room ? "room.send" : "direct.send", room ? { room: room.id, body: text, mentions: members.filter(a => text.includes(`@${a.name}`)).map(a => a.id) } : { agentId: selected, text }); setText(""); }
     catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
-  return <div className="app">
+  const stop = async () => {
+    if (busy || !running.length) return;
+    setBusy(true);
+    try { await command("conversation.stop", { channel: selected, runIds: running.map(r => r.id) }); }
+    catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const tone = (id: string) => Math.max(0, state?.agents.findIndex(a => a.id === id) ?? 0) % 4;
+  const preview = (id: string, fallback: string) => {
+    const last = state?.messages.filter(m => m.channel === id && !m.internalFor).at(-1);
+    return last ? `${last.sender === "user" ? "你：" : ""}${last.text.replace(/[#*`\n]/g, " ")}` : fallback;
+  };
+  const matches = (value: string) => value.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase());
+  const visibleRooms = state?.rooms.filter(r => matches(r.name)) ?? [];
+  const visibleAgents = state?.agents.filter(a => matches(a.name)) ?? [];
+  return <div className={`app ${selected ? "has-conversation" : ""}`}>
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">≋</span><span>raft<span className="brand-dot">.</span></span><small>LOCAL</small></div>
-      <div className="sidebar-nav"><button className={`nav-home ${!selected ? "active" : ""}`} onClick={() => select("")}><span>◈</span> 工作台</button>
-      <div className="nav-label">独立会话 <button aria-label="创建 Agent" onClick={() => setModal("agent")}>＋</button></div>
-      {state?.agents.map((a, i) => <button key={a.id} className={`nav-item ${selected === a.id ? "active" : ""}`} onClick={() => select(a.id)}><span className={`avatar tone-${i % 3}`}>{avatar(a.name)}</span><span>{a.name}<small>{a.parentAgentId ? "子 Agent · " : ""}{statusLabel[a.status]}</small></span><i className={`status-dot ${a.status}`} /></button>)}
-      {!state?.agents.length && <p className="nav-empty">添加你的第一位协作者</p>}
-      <div className="nav-label">协作空间 <button aria-label="创建群聊" onClick={() => setModal("room")}>＋</button></div>
-      {state?.rooms.map(r => <button key={r.id} className={`nav-item room-nav ${selected === r.id ? "active" : ""}`} onClick={() => select(r.id)}><span className="hash">#</span><span>{r.name}<small>{r.members.length} 位成员</small></span></button>)}
-      </div><div className="sidebar-bottom"><button className="settings-entry" aria-label="设置" onClick={() => setSettingsOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m9 3-.7 2.5-2.2 1.3-2.5-.6-2 3.5 1.8 1.9v2.6l-1.8 1.9 2 3.5 2.5-.6 2.2 1.3L9 23h4l.7-2.4 2.2-1.3 2.5.6 2-3.5-1.8-1.9v-2.6l1.8-1.9-2-3.5-2.5.6-2.2-1.3L13 3Z" transform="translate(1 -1) scale(.92)"/><circle cx="11.1" cy="11" r="3" /></svg><span>设置</span><span className="settings-entry-hint">模型配置</span></button><div><i className={`status-dot ${online ? "idle" : "error"}`} /> {online ? "本地服务已连接" : "正在连接…"}</div><small>独立思考 · 共同推进</small></div>
+      <div className="sidebar-top"><button className="brand" aria-label="回到工作台" onClick={() => select("")}>raft<span>.</span></button><div className="create-actions"><button title="创建群聊" aria-label="创建群聊" onClick={() => setModal("room")}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M17 4a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg></button><button aria-label="创建 Agent" title="创建 Agent" onClick={() => setModal("agent")}>＋</button></div></div>
+      <label className="conversation-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg><input aria-label="搜索会话" placeholder="搜索" value={search} onChange={e => setSearch(e.target.value)} />{search && <button aria-label="清除搜索" onClick={() => setSearch("")}>×</button>}</label>
+      <nav className="sidebar-nav" aria-label="会话列表">
+        {visibleRooms.map(r => <button key={r.id} className={`nav-item room-nav ${selected === r.id ? "active" : ""}`} onClick={() => select(r.id)}><GroupAvatar tones={r.members.map(tone)} /><span className="nav-copy"><strong>{r.name}</strong><small>{preview(r.id, `${r.members.length} 位成员 · 开始群聊`)}</small></span></button>)}
+        {visibleAgents.map(a => <button key={a.id} className={`nav-item ${selected === a.id ? "active" : ""}`} onClick={() => select(a.id)}><AgentAvatar tone={tone(a.id)} /><span className="nav-copy"><strong>{a.name}</strong><small>{preview(a.id, a.role || statusLabel[a.status])}</small></span>{a.status === "running" && <i className="status-dot running" title="工作中" />}{a.status === "error" && <i className="status-dot error" title="需要处理" />}</button>)}
+        {!visibleRooms.length && !visibleAgents.length && <p className="nav-empty">{search ? "没有找到匹配的会话" : "点击上方 ＋，添加第一位 Agent"}</p>}
+      </nav>
+      <div className="sidebar-bottom"><button className="nav-home" aria-label="◈ 工作台" onClick={() => select("")}><span className="home-icon">▦</span>工作台</button><button className="settings-entry" aria-label="设置" onClick={() => setSettingsOpen(true)}><span className="profile-avatar">A</span><span>本地工作空间<small><i className={`status-dot ${online ? "idle" : "error"}`} />{online ? "已连接" : "正在连接…"}</small></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="currentColor"/><circle cx="15" cy="17" r="3" fill="currentColor"/></svg></button></div>
     </aside>
     <main className={`main ${selected ? "conversation-main" : ""}`}>
-      <header className="topbar"><div className="breadcrumb">工作空间 <span>/</span> {room ? "群聊" : agent ? "独立会话" : "概览"}</div><div className="model-pill"><i />{snapshot?.model ?? "Claude Agent SDK"}</div></header>
+      {!selected && <header className="topbar"><div className="breadcrumb">工作空间 <span>/</span> {room ? "群聊" : agent ? "独立会话" : "概览"}</div><div className="model-pill"><i />{snapshot?.model ?? "Claude Agent SDK"}</div></header>}
       {!selected ? <section className="welcome">
-        <div className="eyebrow">A SHARED SPACE FOR INDEPENDENT MINDS</div>
-        <h1>让想法汇合。<br /><em>让工作向前。</em></h1>
-        <p className="intro">每位 Agent 拥有自己的会话与思路。<br />把他们带进同一个空间，看见讨论如何变成行动。</p>
-        <div className="welcome-actions"><button className="primary" onClick={() => setModal("agent")}>＋ 创建 Agent</button><button className="secondary" onClick={() => setModal("room")}>建立协作空间 ↗</button></div>
+        <div className="welcome-mascots"><AgentAvatar tone={0} /><AgentAvatar tone={1} /><AgentAvatar tone={2} /></div>
+        <h1>从一段对话开始</h1>
+        <p className="intro">和你的 Agent 聊聊，或邀请他们一起协作。</p>
+        <div className="welcome-actions"><button className="primary" onClick={() => setModal("agent")}>＋ 创建 Agent</button><button className="secondary" onClick={() => setModal("room")}>创建群聊</button></div>
         {!snapshot?.ready && <div className="setup"><strong>先连接你的模型</strong><p>在设置中填写 API 地址、API Key 和模型名称，即可开始使用。</p><button className="setup-link" onClick={() => setSettingsOpen(true)}>配置模型 →</button></div>}
-        <div className="overview-grid"><div><span>01 / MEMBERS</span><strong>{state?.agents.length ?? 0}</strong><p>独立 Agent</p></div><div><span>02 / SPACES</span><strong>{state?.rooms.length ?? 0}</strong><p>协作群聊</p></div><div><span>03 / IN MOTION</span><strong>{state?.agents.filter(a => a.status === "running").length ?? 0}</strong><p>正在推进</p></div></div>
-        <div className="recent"><span className="section-label">最近发生</span>{state?.events.slice(-4).reverse().map(e => <div key={e.seq}><span>{e.text}</span><time>{time(e.at)}</time></div>)}{!state?.events.length && <p>创建一个 Agent，开始第一段对话。</p>}</div>
+
       </section> : <>
         <div className="conversation-heading">
-          <div className="conversation-identity"><h2>{room ? `# ${room.name}` : agent?.name}</h2><p>{room ? `${room.members.length} 位成员 · 各自思考，按需协作` : agent?.role}</p></div>
-          <div className="conversation-actions"><button className={`toggle ${showActivity ? "on" : ""}`} aria-pressed={showActivity} onClick={() => setShowActivity(!showActivity)}>◉ 工具活动</button><button ref={inspectorToggle} className={`toggle ${inspectorOpen ? "on" : ""}`} aria-label="切换状态栏" aria-expanded={inspectorOpen} aria-controls="conversation-inspector" onClick={() => setInspectorOpen(!inspectorOpen)}>▥ 状态栏</button></div>
+          <button className="back-to-chats" aria-label="返回会话列表" onClick={() => select("")}>‹</button>
+          {room ? <GroupAvatar tones={room.members.map(tone)} /> : <AgentAvatar tone={tone(selected)} />}
+          <div className="conversation-identity"><h2>{room?.name ?? agent?.name}</h2><p>{room ? `${room.members.length} 位成员` : statusLabel[agent?.status ?? "idle"]}</p></div>
+          <div className="conversation-actions">{agent && <button className="toggle" onClick={() => setSkillsAgentId(agent.id)}>Skills</button>}<button className={`toggle ${showActivity ? "on" : ""}`} aria-pressed={showActivity} onClick={() => setShowActivity(!showActivity)}>工具活动</button><button ref={inspectorToggle} className={`info-toggle ${inspectorOpen ? "on" : ""}`} title="会话详情" aria-label="切换状态栏" aria-expanded={inspectorOpen} aria-controls="conversation-inspector" onClick={() => setInspectorOpen(!inspectorOpen)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div>
         </div>
-        <div className="timeline">
+        <div className="timeline" onScroll={e => { const el = e.currentTarget; followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
           {!timeline.length && <div className="empty-conversation"><span>{room ? "#" : "◇"}</span><h3>{room ? "一个新的协作起点" : `与 ${agent?.name} 开始对话`}</h3><p>{room ? "提出目标，或 @ 某位成员。工具活动将在这里展开。" : "这里的对话保留在这个 Agent 的独立会话中。"}</p></div>}
           {timeline.map(item => item.message ? <article className={`message ${item.message.sender === "user" ? "user-message" : ""}`} key={item.message.id}>
-            <div className={`avatar ${item.message.sender === "user" ? "user-avatar" : "tone-0"}`}>{avatar(name(item.message.sender))}</div><div className="message-body"><div className="message-meta"><strong>{name(item.message.sender)}</strong><span>{item.message.sender === "user" ? "YOU" : "AGENT"}</span><time>{time(item.at)}</time></div><MarkdownMessage text={item.message.text} /></div>
+            <AgentAvatar tone={tone(item.message.sender)} /><div className="message-body"><div className={`message-meta speaker-${tone(item.message.sender)}`}><strong>{name(item.message.sender)}</strong><time>{time(item.at)}</time></div><div className={`message-bubble ${item.message.delivery === "streaming" ? "streaming-bubble" : ""}`}><MarkdownMessage text={item.message.text} />{room && item.message.delivery === "streaming" && <small className="streaming-note">正在拟稿</small>}{item.message.delivery === "interrupted" && <small className="interrupted-note">已停止</small>}</div></div>
           </article> : item.activity && <div className="activity" key={item.activity.id}><i className={item.activity.status === "running" ? "pulse" : ""} /><span>{name(item.activity.agentId)}</span><span>{item.activity.text}</span><time>{time(item.at)}</time></div>)}
+          {runningAgents.length > 0 && (room ? <div className="group-loading" role="status" aria-label="群成员正在协作"><div className="running-avatar-stack" aria-hidden="true">{runningAgents.map(id => <AgentAvatar key={id} tone={tone(id)} />)}</div><span className="running-members">{runningAgents.map(name).join("、")}<small>正在协作</small></span><div className="typing-dots" aria-hidden="true"><i /><i /><i /></div></div> : runningAgents.map(id => <article className="message loading-message" key={`loading-${id}`} role="status" aria-label={`${name(id)} 正在回复`}><AgentAvatar tone={tone(id)} /><div className="message-body"><div className={`message-meta speaker-${tone(id)}`}><strong>{name(id)}</strong></div><div className="typing-dots" aria-hidden="true"><i /><i /><i /></div></div></article>))}
+          {room && state?.drafts.some(d => d.roomId === room.id && d.status === "held") && <button className="held-replies" onClick={() => { setView("status"); setInspectorOpen(true); }}>有 {state.drafts.filter(d => d.roomId === room.id && d.status === "held").length} 条回复等待重新核验 · 查看草稿</button>}
+          {agent?.error && !running.length && <p className="conversation-error" role="status">{agent.error}</p>}
           <div ref={end} />
         </div>
-        <MessageComposer key={selected} value={text} onChange={setText} send={() => void send()} members={members} group={!!room} placeholder={room ? "描述目标，或 @ 一位成员…" : `向 ${agent?.name} 提问…`} busy={busy} online={online} stopped={agent?.status === "stopped"} />
+        <MessageComposer avatarTone={tone} key={selected} value={text} onChange={setText} send={() => void send()} members={members} group={!!room} placeholder={`给 ${room?.name ?? agent?.name} 发消息`} busy={busy} online={online} running={running.length > 0} stop={() => void stop()} />
       </>}
       {error && <div role="alert" className="toast"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError("")}>×</button></div>}
     </main>
     {selected && inspectorOpen && <aside id="conversation-inspector" className="inspector conversation-inspector" aria-label="会话状态栏">
       <div className="inspector-title"><span>{agent ? "会话状态" : "空间状态"}</span><div><span>LIVE</span><button aria-label="收起状态栏" onClick={closeInspector}>×</button></div></div>
-      {agent && <nav className="inspector-tabs" aria-label="状态栏视图" role="tablist" onKeyDown={event => {
+      {room && <label className="inspection-member">查看成员上下文 <select aria-label="选择群内 Agent" value={inspectionAgent?.id ?? ''} onChange={event => { setInspectionAgentId(event.target.value); setSelectedRun(''); }}>{members.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>}
+      {inspectionAgent && <nav className="inspector-tabs" aria-label="状态栏视图" role="tablist" onKeyDown={event => {
         const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
         const index = tabs.indexOf(document.activeElement as HTMLButtonElement);
         const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
         if (next >= 0) { event.preventDefault(); tabs[next]?.focus(); tabs[next]?.click(); }
       }}>{([['status', '状态'], ['history', '会话详情'], ['traces', '执行日志']] as const).map(([id, label]) => <button id={`inspector-tab-${id}`} aria-controls="inspector-panel" role="tab" tabIndex={view === id ? 0 : -1} aria-selected={view === id} key={id} onClick={() => setView(id)}>{label}</button>)}</nav>}
-      <div id="inspector-panel" className="inspector-panel" role={agent ? "tabpanel" : undefined} aria-labelledby={agent ? `inspector-tab-${view}` : undefined}>
-      {agent && view === 'history' ? <AgentHistory key={agent.id} agent={agent} api={api} onRun={id => { setSelectedRun(id); setView('traces'); }} /> : agent && view === 'traces' ? <AgentTraces key={agent.id} agent={agent} api={api} selectedRun={selectedRun} selectRun={setSelectedRun} onAgent={(id, runId) => { setSelected(id); setSelectedRun(runId); setView('traces'); }} /> : <div className="inspector-status"><div className="section-label member-section-label">成员{room && <button className="add-members-button" aria-label="添加群成员" onClick={() => setMemberRoomId(room.id)}>＋ 添加成员</button>}</div>{members.map(a => <div className="member" key={a.id}><div className="member-row"><span className="avatar tone-0">{avatar(a.name)}</span><div><strong>{a.name}</strong><small><i className={`status-dot ${a.status}`} />{statusLabel[a.status]}</small></div><button onClick={() => void action(() => command(a.status === "running" || a.status === "idle" ? "agent.stop" : "agent.resume", { id: a.id }))}>{a.status === "running" || a.status === "idle" ? "停止" : "继续"}</button></div>{a.error && <p className="member-error">{a.error}</p>}</div>)}
+      <div id="inspector-panel" className="inspector-panel" role={inspectionAgent ? "tabpanel" : undefined} aria-labelledby={inspectionAgent ? `inspector-tab-${view}` : undefined}>
+      {inspectionAgent && view === 'history' ? <AgentHistory key={`${inspectionAgent.id}/${selected}`} agent={inspectionAgent} conversationId={selected} api={api} onRun={id => { setSelectedRun(id); setView('traces'); }} /> : inspectionAgent && view === 'traces' ? <AgentTraces key={`${inspectionAgent.id}/${selected}`} agent={inspectionAgent} conversationId={selected} api={api} selectedRun={selectedRun} selectRun={setSelectedRun} onAgent={(id, runId, channel) => { setSelected(channel || id); setInspectionAgentId(id); setSelectedRun(runId); setView('traces'); }} /> : <div className="inspector-status"><div className="section-label member-section-label">成员{room && <button className="add-members-button" aria-label="添加群成员" onClick={() => setMemberRoomId(room.id)}>＋ 添加成员</button>}</div>{members.map(a => <div className="member" key={a.id}><div className="member-row"><AgentAvatar tone={tone(a.id)} /><div><strong>{a.name}</strong><small><i className={`status-dot ${a.status}`} />{statusLabel[a.status]}</small></div></div>{a.error && <p className="member-error">{a.error}</p>}</div>)}
       {room && <><div className="section-label with-action">任务 <button aria-label="创建任务" onClick={() => setModal("task")}>＋</button></div>{state?.tasks.filter(t => t.roomId === room.id).map(t => <div className="task" key={t.id}><span className={`task-state ${t.status}`}>{statusLabel[t.status]}</span><strong>{t.title}</strong><small>{t.owner ? name(t.owner) : "等待成员领取"}</small>{t.evidence && <details><summary>查看提交说明</summary><MarkdownMessage text={t.evidence} /></details>}{t.status === "reviewing" && <button onClick={() => void action(() => command("task.complete", { id: t.id, expectedVersion: t.version }))}>核验后确认完成</button>}</div>)}{!state?.tasks.some(t => t.roomId === room.id) && <p className="muted">把目标变成可跟踪的任务。</p>}
       <div className="section-label">待处理草稿</div>{state?.drafts.filter(d => d.roomId === room.id && d.status === "held").map(d => <div className="draft" key={d.id}><small>{name(d.agentId)} · 房间有新变化</small><MarkdownMessage text={d.body} /><div><button onClick={() => void action(() => command("draft.resolve", { id: d.id, action: "retry", basedOn: room.version }))}>原样重检发送</button><button onClick={() => void action(() => command("draft.resolve", { id: d.id, action: "discard" }))}>丢弃</button></div></div>)}<div className="room-version"><span>协作版本</span><code>v{room.version}</code></div></>}
-      {agent && <div className="session-info"><details className="agent-role"><summary>职责说明</summary><MarkdownMessage text={agent.role} /></details>{agent.parentAgentId && <><span className="section-label">创建者</span><p>{name(agent.parentAgentId)}</p></>}<span className="section-label">工作目录</span><p>{agent.workspace}</p><span className="section-label">会话</span><p>{agent.sessionId || "首次运行后建立"}</p></div>}
+      {agent && <div className="session-info"><details className="agent-role"><summary>职责说明</summary><MarkdownMessage text={agent.role} /></details>{agent.parentAgentId && <><span className="section-label">创建者</span><p>{name(agent.parentAgentId)}</p></>}<span className="section-label">工作目录</span><p>{agent.workspace}</p><span className="section-label">会话</span><p>{state?.sessions?.find(s => s.agentId === agent.id && s.channel === agent.id)?.sdkSessionId || "首次私聊运行后建立"}</p></div>}
       </div>}
       </div>
     </aside>}
     {!!snapshot?.approvals.length && <div className="approval-tray">{snapshot.approvals.map(a => <div key={a.id}><div className="eyebrow">需要你的授权</div><h3>{name(a.agentId)} 请求使用 {a.tool}</h3><pre>{JSON.stringify(a.input, null, 2)}</pre><div><button className="secondary" onClick={() => void action(() => api("approval", { id: a.id, allow: false }))}>拒绝</button><button className="primary" onClick={() => void action(() => api("approval", { id: a.id, allow: true }))}>允许本次</button></div></div>)}</div>}
     {modal && <CreateDialog kind={modal} agents={state?.agents ?? []} room={room} close={() => setModal(null)} submit={async (args) => { const result = await command(modal === "agent" ? "agent.create" : modal === "room" ? "room.create" : "task.create", args); if (modal !== "task") select(result.id); setModal(null); }} />}
     {memberRoomId && state?.rooms.find(r => r.id === memberRoomId) && <AddMembersDialog room={state.rooms.find(r => r.id === memberRoomId)!} agents={state.agents} close={() => setMemberRoomId(null)} submit={async members => { await command("room.members.add", { room: memberRoomId, members }); }} />}
+    {skillsAgentId && state?.agents.find(a => a.id === skillsAgentId) && <SkillsDialog key={skillsAgentId} agent={state.agents.find(a => a.id === skillsAgentId)!} load={() => api("skills")} save={ids => command("skill.configure", { agentId: skillsAgentId, ids })} publish={id => command("skill.publish", { id })} close={() => setSkillsAgentId(null)} />}
     {settingsOpen && <SettingsDialog load={() => api("settings")} save={async value => { const result = await api("settings", value); await refresh(); return result; }} close={() => setSettingsOpen(false)} />}
   </div>;
 }
 function CreateDialog({ kind, agents, room, close, submit }: { kind: "agent" | "room" | "task"; agents: Agent[]; room: Room | undefined; close: () => void; submit: (args: Record<string, unknown>) => Promise<void> }) {
   const [name, setName] = useState(""); const [role, setRole] = useState("你是一名细致的协作者，先理解目标，再执行并核验结果。"); const [members, setMembers] = useState<string[]>(agents.map(a => a.id)); const [error, setError] = useState(""); const [saving, setSaving] = useState(false);
-  return <div className="modal-backdrop"><form className="dialog" onSubmit={async e => { e.preventDefault(); setSaving(true); try { await submit(kind === "agent" ? { name, role } : kind === "room" ? { name, members } : { room: room?.id, title: name }); } catch (e) { setError(String(e)); } finally { setSaving(false); } }}><div className="dialog-top"><span className="eyebrow">{kind === "agent" ? "NEW COLLABORATOR" : "MAKE ROOM FOR IDEAS"}</span><button type="button" aria-label="关闭弹窗" onClick={close}>×</button></div><h2>{kind === "agent" ? "认识一位新协作者" : kind === "room" ? "建立协作空间" : "定义一个任务"}</h2><label>{kind === "task" ? "任务目标" : "名称"}<input autoFocus required value={name} onChange={e => setName(e.target.value)} placeholder={kind === "agent" ? "例如：Atlas" : kind === "room" ? "例如：产品工作室" : "描述明确的完成目标"} /></label>{kind === "agent" && <><label>角色与职责<textarea required value={role} onChange={e => setRole(e.target.value)} /></label><small>工作目录将自动创建。文件编辑和一般命令会按 SDK 权限规则请求授权。</small></>}{kind === "room" && <fieldset><legend>邀请成员</legend>{agents.map(a => <label className="checkbox" key={a.id}><input type="checkbox" checked={members.includes(a.id)} onChange={e => setMembers(e.target.checked ? [...members, a.id] : members.filter(id => id !== a.id))} />{a.name}<small>{a.role.slice(0, 28)}</small></label>)}{!agents.length && <p>请先创建 Agent，再建立群聊。</p>}</fieldset>}{error && <p className="form-error">{error}</p>}<button className="primary full" disabled={saving}>{saving ? "正在创建…" : "创建"}</button></form></div>;
+  return <div className="modal-backdrop"><form className="dialog" onSubmit={async e => { e.preventDefault(); setSaving(true); try { await submit(kind === "agent" ? { name, role } : kind === "room" ? { name, members } : { room: room?.id, title: name }); } catch (e) { setError(String(e)); } finally { setSaving(false); } }}><div className="dialog-top"><span className="eyebrow">{kind === "agent" ? "AGENT" : "RAFT"}</span><button type="button" aria-label="关闭弹窗" onClick={close}>×</button></div><h2>{kind === "agent" ? "创建 Agent" : kind === "room" ? "创建群聊" : "定义一个任务"}</h2><label>{kind === "task" ? "任务目标" : "名称"}<input autoFocus required value={name} onChange={e => setName(e.target.value)} placeholder={kind === "agent" ? "例如：Atlas" : kind === "room" ? "例如：产品工作室" : "描述明确的完成目标"} /></label>{kind === "agent" && <><label>角色与职责<textarea required value={role} onChange={e => setRole(e.target.value)} /></label><small>工作目录将自动创建。文件编辑和一般命令会按 SDK 权限规则请求授权。</small></>}{kind === "room" && <fieldset><legend>邀请成员</legend>{agents.map(a => <label className="checkbox" key={a.id}><input type="checkbox" checked={members.includes(a.id)} onChange={e => setMembers(e.target.checked ? [...members, a.id] : members.filter(id => id !== a.id))} />{a.name}<small>{a.role.slice(0, 28)}</small></label>)}{!agents.length && <p>请先创建 Agent，再建立群聊。</p>}</fieldset>}{error && <p className="form-error">{error}</p>}<button className="primary full" disabled={saving}>{saving ? "正在创建…" : "创建"}</button></form></div>;
 }
 createRoot(document.getElementById("root")!).render(<App />);

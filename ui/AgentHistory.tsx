@@ -28,15 +28,16 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return index < 0 ? text : <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>;
 }
 
-export function AgentHistory({ agent, api, onRun }: { agent: Agent; api: Api; onRun: (id: string) => void }) {
+export function AgentHistory({ agent, api, onRun, conversationId = agent.id }: { agent: Agent; conversationId?: string; api: Api; onRun: (id: string) => void }) {
+  const [legacy, setLegacy] = useState(false);
   const [session, setSession] = useState(''); const [before, setBefore] = useState('');
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all');
-  const { data, error, loading, reload } = useLive<HistoryPage>(api, `agents/${agent.id}/history?${new URLSearchParams({ ...(session ? { sessionId: session } : {}), ...(before ? { before } : {}) })}`);
+  const { data, error, loading, reload } = useLive<HistoryPage>(api, `agents/${agent.id}/history?${new URLSearchParams({ conversationId: legacy ? 'legacy' : conversationId, ...(session ? { sessionId: session } : {}), ...(before ? { before } : {}) })}`);
   const [newestFirst, setNewestFirst] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [target, setTarget] = useState(''); const [copyNotice, setCopyNotice] = useState('');
   const records = useRef(new Map<string, HTMLElement>());
-  const scope = `${agent.id}/${session}/${before}`;
+  const scope = `${agent.id}/${conversationId}/${legacy}/${session}/${before}`;
   useEffect(() => { setExpanded(new Set()); setCopyNotice(''); setTarget(''); }, [scope]);
   useEffect(() => {
     if (!target) return;
@@ -73,9 +74,11 @@ export function AgentHistory({ agent, api, onRun }: { agent: Agent; api: Api; on
   return <section className="inspection history-dense" aria-label="会话详情">
     <div className="history-controls">
       <div className="history-title"><h3>会话记录</h3><button aria-label="切换输入段排序" title="按输入段排序，段内保持消息原始顺序" onClick={() => setNewestFirst(!newestFirst)}>{newestFirst ? "最新输入在前 ↓" : "最早输入在前 ↑"}</button><button disabled={loading} onClick={reload}>{loading ? '读取中…' : '刷新记录'}</button></div>
+      {legacy && <p className="inspection-footnote">旧版会话可能混有群执行内容，仅供查阅，不再用于恢复当前上下文。</p>}
       <div className="history-filters">
-        <select aria-label="选择历史会话" title={data?.sessionId || '选择历史会话'} value={session || data?.sessionId || ''} onChange={e => { setSession(e.target.value); setBefore(''); }}>
-          {!data?.sessions.length && <option value="">尚无 SDK 会话</option>}{data?.sessions.map(id => <option value={id} key={id}>{short(id)}{id === agent.sessionId ? ' · 当前' : ''}</option>)}
+        <select aria-label="选择历史会话" title={data?.sessionId || '选择历史会话'} value={session || data?.sessionId || ''} onChange={e => { if (e.target.value === '__archive__' || e.target.value === '__current__') { setLegacy(e.target.value === '__archive__'); setSession(''); } else setSession(e.target.value); setBefore(''); }}>
+          {!data?.sessions.length && <option value="">尚无 SDK 会话</option>}{data?.sessions.map(id => <option value={id} key={id}>{short(id)}{id === data?.sessionId ? ' · 已选择' : ''}</option>)}
+          {conversationId === agent.id && <option value={legacy ? '__current__' : '__archive__'}>{legacy ? '返回当前私聊记录' : '查看旧版混合记录（归档）'}</option>}
         </select>
         <select aria-label="筛选会话内容" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">全部记录</option><option value="input">输入与上下文</option><option value="assistant">模型输出</option><option value="tool">工具调用与结果</option><option value="failed">仅看失败</option><option value="system">系统记录</option></select>
         <input aria-label="搜索本页会话" placeholder="搜索本页正文、工具、ID…" value={query} onChange={e => setQuery(e.target.value)} />
@@ -91,7 +94,7 @@ export function AgentHistory({ agent, api, onRun }: { agent: Agent; api: Api; on
       const taggedBlocks = m.blocks.filter(b => b.kind !== 'text');
       const preview = compact(m.blocks.find(b => b.error)?.text || m.blocks.find(b => b.kind === 'text')?.text || m.blocks.map(toolPreview).join(' · ')).slice(0, 240);
       return <Fragment key={m.id}>
-        {(i === 0 || messages[i - 1]?.turn !== m.turn) && <div className="history-turn"><span>输入段 {m.turn || '—'}</span>{m.runId && <button onClick={() => onRun(m.runId!)}>查看本轮执行 ↗</button>}</div>}
+        {(i === 0 || messages[i - 1]?.turn !== m.turn) && <div className="history-turn"><span>输入段 {m.turn || '—'}</span>{m.runId && !legacy && <button onClick={() => onRun(m.runId!)}>查看本轮执行 ↗</button>}</div>}
         <article className={`history-record role-${m.role} ${failed(m) ? 'history-failed' : ''}`} data-message-id={m.id} ref={node => { if (node) records.current.set(m.id, node); else records.current.delete(m.id); }}>
           <button className="history-row-toggle" aria-expanded={open} aria-controls={`history-body-${m.id}`} onClick={() => toggle(m.id)}>
             <span className="history-row-meta"><span className="history-chevron" aria-hidden="true">{open ? '⌄' : '›'}</span><strong>{labels[m.role]}</strong>{failed(m) && <b className="history-error-badge">失败</b>}<code title={m.id}>{short(m.id)}</code><time title={fullTime(m.at)}>{clockTime(m.at)}</time></span>

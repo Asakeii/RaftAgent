@@ -76,7 +76,7 @@ test('查看接口鉴权与会话范围受控，读取不唤醒任务，SDK 事�
   t.after(async () => { await service.close(); await reopened?.close(); rmSync(dir, { recursive: true, force: true }); });
   const command = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: 'user' }, { name, args, requestId: randomUUID() });
   const agent = command('agent.create', { name: 'A', role: 'test' }) as Agent;
-  command('agent.stop', { id: agent.id }); command('direct.send', { agentId: agent.id, text: 'work' });
+  command('direct.send', { agentId: agent.id, text: 'work' }); command('agent.stop', { id: agent.id });
   const base = `http://127.0.0.1:${service.port}/api/agents/${agent.id}`;
   const headers = { Authorization: `Bearer ${service.token}` };
   assert.equal((await fetch(base + '/history')).status, 401);

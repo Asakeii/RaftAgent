@@ -1,21 +1,10 @@
-/* Keep the conversation in place while the adjacent inspector changes views. */
-.conversation-main .topbar{height:44px;padding:0 24px;gap:16px}
-.conversation-main .breadcrumb{white-space:nowrap}
-.conversation-main .model-pill{padding:4px 9px;min-width:0}
-.conversation-main .conversation-heading{padding:12px 24px;gap:16px;flex-shrink:0}
-.conversation-identity{min-width:0;flex:1}
-.conversation-main .conversation-heading h2{font:600 18px/1.4 "Avenir Next","PingFang SC",sans-serif;margin:0 0 3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.conversation-main .conversation-heading p{max-width:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.6}
-.conversation-actions{display:flex;gap:8px;flex-shrink:0}
-.conversation-main .timeline{min-height:0;padding:18px 24px;overscroll-behavior:contain}
-.conversation-main .composer-wrap{padding:8px 24px 16px}
 .inspector.conversation-inspector{display:flex;flex-direction:column;width:340px;padding:0;overflow:hidden}
-.conversation-inspector .inspector-title{height:44px;min-height:44px;padding:0 18px}
+.conversation-inspector .inspector-title{height:68px;min-height:68px;padding:0 18px}
 .inspector-title>div{display:flex;align-items:center;gap:12px}
-.inspector-title>div>span{font-size:8px;letter-spacing:1px;color:#829077}
-.inspector-title button{font-size:20px;line-height:1;padding:4px;color:#7b8975;border-radius:4px}
+.inspector-title>div>span{font-size:8px;letter-spacing:1px;color:#8b8b8b}
+.inspector-title button{font-size:20px;line-height:1;padding:4px;color:#858585;border-radius:4px}
 .inspector-tabs{display:flex;padding:0 16px;border-bottom:1px solid var(--line);flex-shrink:0;gap:16px}
-.inspector-tabs button{padding:14px 0 12px;border-bottom:2px solid transparent;font-size:12px;color:#83907b;white-space:nowrap}
+.inspector-tabs button{padding:14px 0 12px;border-bottom:2px solid transparent;font-size:12px;color:#8c8c8c;white-space:nowrap}
 .inspector-tabs [aria-selected=true]{color:var(--green);border-color:var(--green);font-weight:600}
 .inspector-panel{display:flex;flex:1;min-height:0;min-width:0}
 .inspector-status{padding:0 18px 24px;overflow:auto;flex:1;min-width:0;overscroll-behavior:contain}
@@ -26,7 +15,7 @@
 .agent-role .prose{font-size:12px;max-height:320px;overflow:auto;margin-top:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .conversation-inspector .inspection{padding:18px 16px 24px;min-width:0;overscroll-behavior:contain}
 .conversation-inspector .inspection-head{align-items:center;gap:8px;margin-bottom:16px}
-.conversation-inspector .inspection-head h3{font:600 13px/1.5 "Avenir Next","PingFang SC",sans-serif;letter-spacing:0;margin:0}
+.conversation-inspector .inspection-head h3{font:600 13px/1.5 inherit;letter-spacing:0;margin:0}
 .conversation-inspector .inspection-head .eyebrow,.conversation-inspector .inspection-head p{display:none}
 .conversation-inspector .inspection-head>button{padding:6px 9px;font-size:10px}
 .conversation-inspector .inspection-toolbar{flex-wrap:wrap;gap:10px;margin:16px 0}
@@ -47,29 +36,23 @@
 .conversation-inspector .turn-divider{gap:8px;letter-spacing:0}
 .conversation-inspector .turn-divider button{flex-shrink:0}
 @media(max-width:1100px){
-  .inspector.conversation-inspector{position:fixed;right:0;top:0;bottom:0;z-index:15;width:min(360px,100vw);box-shadow:-12px 0 36px #182e271c}
+  .inspector.conversation-inspector{position:fixed;right:0;top:0;bottom:0;z-index:15;width:min(360px,100vw);box-shadow:-12px 0 36px #2929291c}
 }
-@media(max-width:700px){
-  .conversation-main .topbar{padding:0 16px}
-  .conversation-main .conversation-heading{padding:10px 16px;gap:8px}
-  .conversation-actions{gap:4px}
-  .conversation-actions .toggle{padding:6px}
-  .conversation-main .timeline{padding:16px}
-  .conversation-main .composer-wrap{padding:8px 16px 12px}
-}
-
 .member-section-label{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.add-members-button{font-size:11px;letter-spacing:0;color:var(--green);padding:6px 8px;border-radius:5px;background:#edf2e6}
-.add-members-dialog{width:480px;max-width:calc(100vw - 32px);color:#253832}
-.add-members-dialog::backdrop{background:#132c255c;backdrop-filter:blur(4px)}
-.members-intro{font-size:12px;color:#7b8970;line-height:1.7;overflow-wrap:anywhere}
+.add-members-button{font-size:11px;letter-spacing:0;color:var(--green);padding:6px 8px;border-radius:5px;background:#f0f0f0}
+.add-members-dialog{width:480px;max-width:calc(100vw - 32px);color:#343434}
+.add-members-dialog::backdrop{background:#2626265c;backdrop-filter:blur(4px)}
+.members-intro{font-size:12px;color:#848484;line-height:1.7;overflow-wrap:anywhere}
 .add-members-dialog .member-options{margin-top:20px;max-height: min(340px,40vh);overflow:auto}
 .add-members-dialog .member-option{display:flex;align-items:center;gap:12px;margin:10px 0 0;padding:12px;border:1px solid var(--line);border-radius:7px;cursor:pointer}
-.member-option:has(input:checked){background:#edf2e6;border-color:#9aad8d}
+.member-option:has(input:checked){background:#f0f0f0;border-color:#a7a7a7}
 .member-option input{accent-color:var(--green);flex-shrink:0}
 .member-option-text{min-width:0;display:flex;flex-direction:column;gap:5px}
 .member-option-text strong{font-size:12px;overflow-wrap:anywhere}
-.member-option-text small{font-size:10px;color:#849177;line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
-.members-note,.members-empty{font-size:11px;line-height:1.8;color:#849177;margin:18px 0}
+.member-option-text small{font-size:10px;color:#8c8c8c;line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.members-note,.members-empty{font-size:11px;line-height:1.8;color:#8c8c8c;margin:18px 0}
 .members-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:24px}
-.members-actions>span{margin-right:auto;font-size:11px;color:#849177}
+.members-actions>span{margin-right:auto;font-size:11px;color:#8c8c8c}
+
+.inspection-member { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; font-size: 12px; color: #707070; }
+.inspection-member select { min-width: 0; max-width: 60%; padding: 5px 8px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; color: #373737; }

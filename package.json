@@ -26,7 +26,9 @@
     "smoke:desktop": "tsx tests/desktop-smoke.ts",
     "smoke:search-sdk": "tsx tests/search-sdk-live-smoke.ts",
     "smoke:inspection": "tsx tests/inspection-ui-smoke.ts",
-    "smoke:tavily": "tsx tests/tavily-live-smoke.ts"
+    "smoke:tavily": "tsx tests/tavily-live-smoke.ts",
+    "smoke:context-sdk": "tsx tests/context-sdk-smoke.ts",
+    "smoke:context-ui": "tsx tests/context-ui-smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.267",

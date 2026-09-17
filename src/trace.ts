@@ -40,14 +40,21 @@ export class TraceStore {
   linkMessage(messageId: string, runId: string) {
     this.write(() => { this.db.prepare('INSERT OR IGNORE INTO trace_messages(message_id,run_id) VALUES(?,?)').run(messageId, runId); });
   }
-  list(agentId: string, before?: string, limit = 30): { runs: TraceRun[]; nextBefore: string | null } {
-    const rows = this.db.prepare('SELECT json FROM trace_runs WHERE agent_id=? AND ordinal < COALESCE((SELECT ordinal FROM trace_runs WHERE id=?),9223372036854775807) ORDER BY ordinal DESC LIMIT ?').all(agentId, before ?? '', limit + 1);
-    const runs = rows.slice(0, limit).map(row => JSON.parse(String(row.json)) as TraceRun);
-    return { runs, nextBefore: rows.length > limit ? runs.at(-1)!.id : null };
+  private scopedRuns(agentId: string, channel?: string) {
+    return this.db.prepare('SELECT json FROM trace_runs WHERE agent_id=? ORDER BY ordinal DESC').all(agentId)
+      .map(row => JSON.parse(String(row.json)) as TraceRun)
+      .filter(run => channel === undefined || (channel === 'legacy' ? run.contextVersion !== 1 : run.contextVersion === 1 && run.channel === channel));
   }
-  sessions(agentId: string): { sessions: string[]; runInputs: Map<string, string> } {
-    const runs = this.db.prepare('SELECT json FROM trace_runs WHERE agent_id=? ORDER BY ordinal DESC').all(agentId).map(r => JSON.parse(String(r.json)) as TraceRun);
-    const links = this.db.prepare('SELECT message_id,run_id FROM trace_messages JOIN trace_runs ON trace_messages.run_id=trace_runs.id WHERE agent_id=?').all(agentId);
+  list(agentId: string, before?: string, limit = 30, channel?: string): { runs: TraceRun[]; nextBefore: string | null } {
+    const all = this.scopedRuns(agentId, channel);
+    const start = before ? all.findIndex(run => run.id === before) + 1 : 0;
+    const runs = all.slice(start, start + limit);
+    return { runs, nextBefore: start + limit < all.length ? runs.at(-1)!.id : null };
+  }
+  sessions(agentId: string, channel?: string): { sessions: string[]; runInputs: Map<string, string> } {
+    const runs = this.scopedRuns(agentId, channel);
+    const ids = new Set(runs.map(r => r.id));
+    const links = this.db.prepare('SELECT message_id,run_id FROM trace_messages JOIN trace_runs ON trace_messages.run_id=trace_runs.id WHERE agent_id=?').all(agentId).filter(r => ids.has(String(r.run_id)));
     return { sessions: [...new Set(runs.flatMap(r => r.sessionId ? [r.sessionId] : []))], runInputs: new Map([...runs.map(r => [r.inputId, r.id] as [string, string]), ...links.map(r => [String(r.message_id), String(r.run_id)] as [string, string])]) };
   }
   events(id: string, after = 0, limit = 200): { events: TraceEvent[]; nextAfter: number | null } {

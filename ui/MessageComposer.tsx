@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { AgentAvatar } from "./Avatars";
 import type { Agent } from "../src/contracts";
 
 type MentionQuery = { start: number; end: number; query: string };
@@ -12,9 +13,10 @@ function mentionAt(input: HTMLTextAreaElement): MentionQuery | null {
 
 const statuses: Record<Agent["status"], string> = { idle: "待命", running: "工作中", stopped: "已停止", error: "需要处理" };
 
-export function MessageComposer({ value, onChange, send, members, group, placeholder, busy, online, stopped }: {
+export function MessageComposer({ value, onChange, send, members, group, placeholder, busy, online, running, stop, avatarTone }: {
+  avatarTone: (id: string) => number;
   value: string; onChange: (value: string) => void; send: () => void;
-  members: Agent[]; group: boolean; placeholder: string; busy: boolean; online: boolean; stopped: boolean;
+  members: Agent[]; group: boolean; placeholder: string; busy: boolean; online: boolean; running: boolean; stop: () => void;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
@@ -47,6 +49,11 @@ export function MessageComposer({ value, onChange, send, members, group, placeho
     onChange(value.slice(0, mention.start) + insertion + value.slice(mention.end));
     setMention(null); setHighlight(0);
   }
+  useLayoutEffect(() => {
+    if (!input.current) return;
+    input.current.style.height = "auto";
+    input.current.style.height = `${Math.min(input.current.scrollHeight, 180)}px`;
+  }, [value]);
   return <div className="composer-wrap"><div className="composer">
     {open && <div className="mention-popup">
       <div className="mention-heading"><strong>提及群成员</strong><span>{candidates.length} 位 Agent</span></div>
@@ -54,7 +61,7 @@ export function MessageComposer({ value, onChange, send, members, group, placeho
         {candidates.map((agent, index) => <div key={agent.id} id={`${listId}-${agent.id}`} role="option" aria-selected={index === active}
           className={`mention-option ${index === active ? "active" : ""}`} onMouseEnter={() => setHighlight(index)}
           onMouseDown={event => event.preventDefault()} onClick={() => choose(agent)}>
-          <span className={`avatar tone-${index % 3}`}>{agent.name.slice(0, 1).toUpperCase()}</span>
+          <AgentAvatar tone={avatarTone(agent.id)} />
           <span className="mention-person"><strong>{agent.name}</strong><small>{agent.role}</small></span>
           <span className="mention-status"><i className={`status-dot ${agent.status}`} />{statuses[agent.status]}</span>
         </div>)}
@@ -62,7 +69,12 @@ export function MessageComposer({ value, onChange, send, members, group, placeho
       {!candidates.length && <p className="mention-empty" role="status">没有匹配的群成员</p>}
       <div className="mention-help">↑ ↓ 选择 <span>Enter / Tab 确认</span><span>Esc 关闭</span></div>
     </div>}
-    <textarea ref={input} aria-label="输入消息" aria-autocomplete={group ? "list" : undefined}
+    {group && <button className="mention-trigger" aria-label="提及成员" title="提及成员" disabled={busy} onClick={() => {
+      const next = value + (value && !/\s$/.test(value) ? " @" : "@");
+      pendingCaret.current = next.length; onChange(next); setHighlight(0);
+      setMention({ start: next.length - 1, end: next.length, query: "" });
+    }}>@</button>}
+    <textarea rows={1} ref={input} aria-label="输入消息" aria-autocomplete={group ? "list" : undefined}
       aria-controls={open ? listId : undefined} aria-activedescendant={activeId}
       placeholder={placeholder} value={value} readOnly={busy}
       onChange={event => { onChange(event.target.value); setHighlight(0); updateMention(event.target); }}
@@ -84,8 +96,8 @@ export function MessageComposer({ value, onChange, send, members, group, placeho
             return;
           }
         }
-        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (online && !busy) { setMention(null); send(); } }
+        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (online && !busy && !running) { setMention(null); send(); } }
       }} />
-    <div className="composer-bottom"><span>{group ? "群聊消息按需进入成员的 inbox" : "独立会话 · 历史自动保存"}</span><button className="send" aria-label="发送消息" disabled={!value.trim() || busy || !online} onClick={() => { setMention(null); send(); }}>↑</button></div>
-  </div><small>Enter 发送 · Shift + Enter 换行 {stopped ? "· 已停止，消息将排队，点击继续后运行" : ""}</small></div>;
+    <div className="composer-bottom"><button className={`send ${running ? "stop-send" : ""}`} aria-label={running ? "停止回复" : "发送消息"} title={running ? "停止当前会话的回复" : "发送消息"} disabled={busy || !online || (!running && !value.trim())} onClick={() => { setMention(null); if (running) stop(); else send(); }}>{running ? <span className="stop-square" aria-hidden="true" /> : "↑"}</button></div>
+  </div><small>{running ? "正在回复 · 点击方块停止，可先编辑下一条消息" : "Enter 发送 · Shift + Enter 换行"}</small></div>;
 }

@@ -1,6 +1,6 @@
 import { createServer as httpServer, type IncomingMessage } from "node:http";
 import { createServer as netServer } from "node:net";
-import { mkdir, chmod, readFile, writeFile, unlink } from "node:fs/promises";
+import { mkdir, chmod, readFile, writeFile, unlink, realpath } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -42,17 +42,23 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   const script = `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "dist/cli.js"))} ctl "$@"\n`;
   await writeFile(join(bin, "raftctl"), script, { mode: 0o700 }); await chmod(join(bin, "raftctl"), 0o700);
   const store = new Store(join(dataDir, "raft.sqlite"), resolve(dataDir, "workspaces")); store.recover();
-  const socket = join(tmpdir(), `raft-${randomUUID().slice(0, 12)}.sock`);
-  const skills = new SkillManager(store, resolve(dataDir, "skills"));
+  // Seatbelt 按实际路径匹配 Socket；macOS /var 通常链接到 /private/var。
+  const socket = join(await realpath(tmpdir()), `raft-${randomUUID().slice(0, 12)}.sock`);
+  let skills: SkillManager;
+  try { skills = new SkillManager(store, resolve(dataDir, "skills"), join(root, "resources/raft-plugin")); }
+  catch (error) { store.close(); await unlink(lockPath); throw error; }
   const traces = new TraceStore(join(dataDir, 'traces.sqlite'));
   const scheduler = new Scheduler(store, runtimeEnv, socket, root, bin, runner, skills, traces);
+  scheduler.yolo = modelSettings.view().yolo;
+  let settingsQueue: Promise<unknown> = Promise.resolve();
   const subscribers = new Set<import("node:http").ServerResponse>();
   let closing = false;
   traces.changed = () => { if (!closing) for (const response of subscribers) response.write('data: trace\n\n'); };
+  scheduler.changed = () => { if (!closing) for (const response of subscribers) response.write('data: reply\n\n'); };
   const snapshot = (): Snapshot => {
     const s = store.state;
     // 内部幂等载荷、待执行输入等不进入通用 UI 投影。
-    return { state: { ...s, requests: {}, inputs: [], notices: {} }, approvals: [...scheduler.approvals.values()].map(x => x.value), ready: Boolean(runtimeEnv.ANTHROPIC_API_KEY?.trim()), model: runtimeEnv.ANTHROPIC_MODEL || "SDK 默认模型", dataDir };
+    return { streamingMessages: [...scheduler.streamingMessages.values()], state: { ...s, requests: {}, inputs: [], notices: {} }, approvals: [...scheduler.approvals.values()].map(x => x.value), ready: Boolean(runtimeEnv.ANTHROPIC_API_KEY?.trim()), model: runtimeEnv.ANTHROPIC_MODEL || "SDK 默认模型", dataDir };
   };
   store.changed = () => {
     if (closing) return;
@@ -101,15 +107,18 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
         if (inspect && req.method === 'GET') {
           const agent = store.state.agents.find(a => a.id === inspect[1]);
           if (!agent) { json(404, { error: 'Agent 不存在。' }); return; }
+          const conversationId = url.searchParams.get('conversationId') || agent.id;
+          if (conversationId !== agent.id && conversationId !== 'legacy' && !store.state.rooms.some(r => r.id === conversationId && r.members.includes(agent.id))) throw new DomainError('会话不存在或 Agent 不在该群');
           const number = (key: string, fallback: number, max: number) => {
             const raw = url.searchParams.get(key); const value = raw === null ? fallback : Number(raw);
             if (!Number.isSafeInteger(value) || value < 0 || value > max || (key === 'limit' && value === 0)) throw new DomainError('分页参数无效。');
             return value;
           };
           if (inspect[2] === 'history' && !inspect[3]) {
-            const known = traces.sessions(agent.id);
-            const sessions = [...new Set([...(agent.sessionId ? [agent.sessionId] : []), ...known.sessions])];
-            const sessionId = url.searchParams.get('sessionId') || agent.sessionId || sessions[0] || null;
+            const known = traces.sessions(agent.id, conversationId);
+            const current = conversationId === "legacy" ? agent.sessionId : store.state.sessions?.find(x => x.agentId === agent.id && x.channel === conversationId)?.sdkSessionId;
+            const sessions = [...new Set([...(current ? [current] : []), ...known.sessions])];
+            const sessionId = url.searchParams.get('sessionId') || current || sessions[0] || null;
             try {
               const page = await readHistory({ sessionId, sessions, workspace: agent.workspace, limit: number('limit', 40, 100),
                 ...(url.searchParams.get('before') ? { before: url.searchParams.get('before')! } : {}),
@@ -121,32 +130,48 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
           }
           if (inspect[2] === 'traces' && inspect[3]) {
             const run = traces.get(inspect[3]);
-            if (!run || run.agentId !== agent.id) { json(404, { error: '执行记录不存在。' }); return; }
+            if (!run || run.agentId !== agent.id || (conversationId === "legacy" ? run.contextVersion === 1 : run.contextVersion !== 1 || run.channel !== conversationId)) { json(404, { error: '执行记录不存在。' }); return; }
             json(200, { run, ...traces.events(run.id, number('after', 0, Number.MAX_SAFE_INTEGER)),
-              related: traces.related(run.traceId).map(r => ({ id: r.id, agentId: r.agentId, status: r.status })), warning: traces.warning }); return;
+              related: traces.related(run.traceId).map(r => ({ id: r.id, agentId: r.agentId, channel: r.channel, status: r.status })), warning: traces.warning }); return;
           }
           if (inspect[2] === 'traces') {
-            json(200, { ...traces.list(agent.id, url.searchParams.get('before') || undefined), pending: store.state.inputs.filter(i => i.agentId === agent.id && i.status === 'pending').length,
+            json(200, { ...traces.list(agent.id, url.searchParams.get('before') || undefined, 30, conversationId), pending: store.state.inputs.filter(i => i.agentId === agent.id && i.channel === conversationId && i.status === 'pending').length,
               agentStatus: agent.status, ready: !!runtimeEnv.ANTHROPIC_API_KEY?.trim(), warning: traces.warning,
-              legacyRuns: store.state.runs.filter(r => r.agentId === agent.id && !traces.get(r.id)).length }); return;
+              legacyRuns: store.state.runs.filter(r => r.agentId === agent.id && (conversationId === "legacy" ? !r.channel : r.channel === conversationId) && !traces.get(r.id)).length }); return;
           }
           json(404, { error: '接口不存在' }); return;
         }
         if (url.pathname === "/api/settings" && req.method === "GET") { json(200, modelSettings.view()); return; }
         if (url.pathname === "/api/settings" && req.method === "POST") {
-          const settings = modelSettings.save(await body(req));
+          const input = await body(req);
+          const update = settingsQueue.then(async () => {
+            const settings = modelSettings.save(input);
+            await scheduler.setYolo(settings.yolo);
+            return settings;
+          });
+          settingsQueue = update.catch(() => {});
+          const settings = await update;
           // 通知界面，但保存配置本身不唤醒此前排队的任务。
           for (const response of subscribers) response.write(`data: settings\n\n`);
           json(200, settings); return;
         }
+        if (url.pathname === "/api/skills" && req.method === "GET") { json(200, { skills: skills.catalogView(), directory: skills.directory }); return; }
         if (url.pathname === "/api/state" && req.method === "GET") { json(200, snapshot()); return; }
         if (url.pathname === "/api/events" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }); res.write("data: ready\n\n"); subscribers.add(res); req.on("close", () => subscribers.delete(res)); return;
         }
         if (url.pathname === "/api/command" && req.method === "POST") {
           const command = parseCommand(await body(req));
-          const result = store.execute({ kind: "user" }, command);
+          const result = command.name.startsWith("skill.")
+            ? await skills.execute({ kind: "user" }, command, () => undefined)
+            : store.execute({ kind: "user" }, command);
           if (command.name === "agent.stop") scheduler.stop(String(command.args.id));
+          if (command.name === "conversation.stop") {
+            for (const id of (result as { runIds: string[] }).runIds) {
+              const run = store.state.runs.find(r => r.id === id)!;
+              if (run.status === "running") scheduler.stop(run.agentId);
+            }
+          }
           json(200, { ok: true, data: result }); return;
         }
         if (url.pathname === "/api/approval" && req.method === "POST") {

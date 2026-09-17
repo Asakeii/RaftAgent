@@ -37,6 +37,27 @@ try {
   assert.equal(first.refresh.status, "loaded", JSON.stringify(first));
   assert.ok(first.refresh.skills.includes("raft-local:echo-local"));
   assert.ok((await stream.supportedCommands()).some(c => c.name === "raft-local:echo-local"));
+  const other = service.store.execute({ kind: "user" }, { name: "agent.create", args: { name: "Consumer", role: "test" }, requestId: "consumer" }) as Agent;
+  const consumer = query({ prompt: input(), options: {
+    cwd: other.workspace, env: { ...process.env, ANTHROPIC_API_KEY: "test" }, settingSources: [], strictMcpConfig: true, mcpServers: {},
+    plugins: [{ type: "local", path: service.skills.prepare(other.id), skipMcpDiscovery: true }, { type: "local", path: service.skills.prepare(other.id, "raft"), skipMcpDiscovery: true }],
+    skills: "all", tools: ["Read", "Skill"], settings: { disableBundledSkills: true }, persistSession: false,
+  } });
+  try {
+    const initial = await consumer.initializationResult();
+    assert.ok(!initial.commands.some(c => c.name === "raft-local:echo-local"));
+    assert.ok(initial.commands.some(c => c.name === "raft:tavily-search"));
+    await service.skills.execute({ kind: "user" }, { name: "skill.configure", args: { agentId: other.id, ids: [first.id] }, requestId: "enable-shared" }, () => undefined);
+    service.skills.prepare(other.id); service.skills.prepare(other.id, "raft");
+    const enabled = await consumer.reloadSkills();
+    assert.ok(enabled.skills.some(c => c.name === "raft-local:echo-local"));
+    assert.ok(!enabled.skills.some(c => c.name === "raft:tavily-search"));
+    await service.skills.execute({ kind: "user" }, { name: "skill.configure", args: { agentId: other.id, ids: [] }, requestId: "disable-shared" }, () => undefined);
+    service.skills.prepare(other.id);
+    const disabled = await consumer.reloadSkills();
+    assert.ok(!disabled.skills.some(c => c.name === "raft-local:echo-local"));
+    console.log("SHARED_SKILLS_SDK_OK: 第二个真实 Query 按配置发现、启用、停用同一共享 Skill；内置搜索也可停用");
+  } finally { consumer.close(); }
   await writeFile(join(source, "SKILL.md"), doc("Version two"));
   const updated = await call(["skill", "publish", "--source", "draft", "--request-id", "second"]);
   assert.equal(updated.refresh.status, "loaded"); assert.notEqual(updated.version, first.version);

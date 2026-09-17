@@ -42,11 +42,12 @@ try {
   const children = service.store.state.agents.filter(a => a.parentAgentId === parent.id);
   const child = children[0];
   const result = service.store.state.messages.find(m => m.id.startsWith("delegation:") && m.sender === child?.id && m.channel === parent.id);
-  const parentSession = service.store.state.agents.find(a => a.id === parent.id)?.sessionId;
+  const parentSession = service.store.state.sessions?.find(s => s.agentId === parent.id && s.channel === parent.id)?.sdkSessionId;
+  const childSession = service.store.state.sessions?.find(s => s.agentId === child?.id && s.channel === child.id)?.sdkSessionId;
   const checks = {
     oneChild: children.length === 1 && child?.name === "Calculator",
-    independentSessions: !!child?.sessionId && !!parentSession && child.sessionId !== parentSession,
-    customSystemPrompt: runs.some(r => r.sessionId === child?.sessionId && r.childPrompt),
+    independentSessions: !!childSession && !!parentSession && childSession !== parentSession,
+    customSystemPrompt: runs.some(r => r.sessionId === childSession && r.childPrompt),
     computedResult: !!result?.text.includes("CHILD_SYSTEM_MARKER") && /\b42\b/.test(result.text),
     resultAcknowledged: !!result && service.store.state.receipts.some(r => r.agentId === parent.id && r.messageId === result.id && r.read),
     parentFinished: service.store.state.messages.some(m => m.sender === parent.id && m.text.includes("PARENT_ACK")),

@@ -1,6 +1,6 @@
 # 编写、发布和热加载 Skill
 
-当功能值得复用时，将使用方法写进 Skill，实际执行由本地工具、脚本或 CLI 完成。Skill 的作用域是当前 Agent，不自动共享给父成员、子成员或整个群聊。
+当功能值得复用时，将使用方法写进 Skill，实际执行由本地工具、脚本或 CLI 完成。Skill 源码和发布版本统一存于应用数据目录的 skills/sources 与 skills/releases。每个 Agent 按启用配置加载；发布自动为维护者启用，其他成员由用户在 Skills 配置中勾选。
 
 在自己的工作目录创建一个草稿目录，例如：
 
@@ -42,7 +42,7 @@ raftctl skill list --json
 
 `list` 返回当前成员已发布的名称、描述、版本和发布目录；不代表模型已执行这些 Skills。运行内用 SDK 原生 reloadSkills 刷新，下一轮启动时自动恢复发布目录并继续使用同一 SDK 会话。
 
-更新：修改草稿，用**新的** request-id 再次 publish，同名 Skill 切换版本。重试同一次发布必须复用原 request-id；即使草稿后来改变，也只返回原发布凭据，不会偷换成新内容。原版本已被替换或移除时，重试可能返回 `active=false`。`raftctl request status --id ORIGINAL_ID` 查询持久发布结果，不代表当前 Query 已加载。
+更新：修改草稿，用**新的** request-id 再次 publish；宿主将副本存入共享源码目录并发布新版本。也可由用户直接修改总目录中的源码，再在 Skills 面板点击“发布源码修改”。Agent 只能更新自己维护的 Skill，不能覆盖其他维护者的同名 Skill。重试同一次发布必须复用原 request-id；即使草稿后来改变，也只返回原发布凭据，不会偷换成新内容。原版本已被替换或移除时，重试可能返回 `active=false`。`raftctl request status --id ORIGINAL_ID` 查询持久发布结果，不代表当前 Query 已加载。
 
 移除：
 
@@ -50,12 +50,16 @@ raftctl skill list --json
 raftctl skill remove --name count-lines --request-id remove-count-001 --json
 ```
 
-检查 `data.refresh.status=loaded` 且列表不再包含此 Skill。移除只影响后续发现与加载，不能抹去已进入上下文的说明或终止已启动命令；历史发布文件保留供核验。不能用此命令移除内置协作 Skill。
+检查 `data.refresh.status=loaded` 且列表不再包含此 Skill。移除仅停用当前 Agent 的配置，保留共享库及其他成员的启用项。停用只影响后续发现与加载，不能抹去已进入上下文的说明或终止已启动命令；历史发布文件保留供核验。不能用此命令移除内置协作 Skill。
 
 当前发布格式：
 
 - `name`、`description` 必填，可选 `argument-hint`，正文非空。name 使用小写字母、数字和连字符，最长 64 字符。
 - 其余 frontmatter 字段暂不开放，尤其不能声明 allowed-tools、hooks、context 或 agent；权限继续沿用应用规则。内联 shell 展开 `!` 加反引号不支持，通过 Bash 显式执行。
-- 每个 Skill 最多 128 个文件、2 MB、8 层目录；每个 Agent 最多 32 个 Skills。
-- 来源必须在当前工作目录内，包内不接受符号链接、隐藏配置、MCP 或插件清单。发布只复制 Skill 与必要资源。
+- 每个 Skill 最多 128 个文件、2 MB、8 层目录；每个 Agent 最多启用 34 个 Skills（包含内置能力）。
+- 来源必须在当前工作目录内，包内不接受符号链接、隐藏配置、MCP 或插件清单。发布只复制 Skill 与必要资源。凭证与个人邮箱配置仍留在各自工作目录，不放入共享 Skill。
 - 发布失败时修正草稿，不修改应用源码、SDK 设置或托管插件目录来绕过流程。
+
+## 共享目录和启用配置
+
+`raftctl skill catalog --json` 查看共享库，`skill list` 查看自己启用的条目。路径以返回值为准。用户在成员对话上方的 Skills 面板配置启用项；其他 Agent 不会因为有人发布了新 Skill 就自动加载。配置和其他维护者发布的新版本在下一轮或显式 `skill reload` 后生效。Skills 名单控制发现与加载，不替代文件访问权限。

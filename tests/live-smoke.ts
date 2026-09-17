@@ -35,7 +35,7 @@ try {
     if (service.store.state.agents.some(x => x.status === "error")) break;
     if (service.store.state.messages.some(m => m.channel === room.id && m.sender === b.id && m.text.includes("SMOKE_ACK")) && service.scheduler.active.size === 0) break;
   }
-  const report = { dataDir: dir, init, tools, agents: service.store.state.agents.map(x => ({ name: x.name, status: x.status, sessionId: x.sessionId, error: x.error })), messages: service.store.state.messages.map(m => ({ channel: m.channel === room.id ? "room" : "direct", sender: m.sender, text: m.text })), passed: service.store.state.messages.some(m => m.channel === room.id && m.sender === b.id && m.text.includes("SMOKE_ACK")) };
+  const report = { dataDir: dir, init, tools, agents: service.store.state.agents.map(x => ({ name: x.name, status: x.status, sessions: service.store.state.sessions?.filter(s => s.agentId === x.id), error: x.error })), messages: service.store.state.messages.map(m => ({ channel: m.channel === room.id ? "room" : "direct", sender: m.sender, text: m.text })), passed: service.store.state.messages.some(m => m.channel === room.id && m.sender === b.id && m.text.includes("SMOKE_ACK")) };
   await writeFile(join(dir, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   if (!report.passed) process.exitCode = 1;

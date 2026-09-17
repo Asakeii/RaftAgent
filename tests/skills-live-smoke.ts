@@ -38,17 +38,17 @@ try {
     }
     if (Date.now() - started > announced + 20_000) {
       announced = Date.now() - started;
-      console.log(JSON.stringify({ elapsed: Math.round(announced / 1000), status: service.store.state.agents[0]?.status, tools: tools.map(t => t.name), published: service.store.state.publishedSkills?.length ?? 0 }));
+      console.log(JSON.stringify({ elapsed: Math.round(announced / 1000), status: service.store.state.agents[0]?.status, tools: tools.map(t => t.name), published: service.store.state.skillCatalog?.length ?? 0 }));
     }
     if (service.store.state.runs.length && service.scheduler.active.size === 0) break;
   }
-  const skill = service.store.state.publishedSkills?.find(s => s.agentId === agent.id && s.name === "math-helper");
+  const skill = service.store.state.skillCatalog?.find(s => s.ownerAgentId === agent.id && s.name === "math-helper");
   const checks = {
     oneQuery: queryCount === 1 && sessions.length === 1,
     wroteSkill: tools.some(t => t.name === "Write" && String(t.input.file_path).endsWith("/SKILL.md")),
     published: !!skill,
     skillInvoked: tools.some(t => t.name === "Skill" && t.input.skill === "raft-local:math-helper"),
-    scriptInvoked: !!skill && tools.some(t => t.name === "Bash" && String(t.input.command).includes("/scripts/add.mjs") && (String(t.input.command).includes(skill.version) || String(t.input.command).includes("/plugin/skills/math-helper/"))),
+    scriptInvoked: !!skill && tools.some(t => t.name === "Bash" && String(t.input.command).includes("/scripts/add.mjs") && (String(t.input.command).includes(skill.version) || String(t.input.command).includes("/raft-local/skills/math-helper/"))),
     actualOutput: outputs.some(output => output.includes("HOT_SKILL_OK_42")),
     noError: service.store.state.runs.length === 1 && service.store.state.runs[0]?.status === "done",
   };

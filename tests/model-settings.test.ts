@@ -15,7 +15,7 @@ test("模型设置持久保存，Key 不回显；留空保留、明确清除，�
   const settings = new ModelSettings(dir, env);
   assert.equal(settings.view().source, "environment"); assert.equal(settings.view().hasApiKey, true);
   const saved = settings.save({ baseUrl: "https://example.com/compatible/", model: " model-a ", apiKey: "new-key" });
-  assert.deepEqual(saved, { baseUrl: "https://example.com/compatible", model: "model-a", hasApiKey: true, source: "saved" });
+  assert.deepEqual(saved, { baseUrl: "https://example.com/compatible", model: "model-a", hasApiKey: true, source: "saved", yolo: false });
   assert.equal(statSync(settings.path).mode & 0o777, 0o600);
   assert.equal(env.ANTHROPIC_API_KEY, "environment-key");
   settings.save({ baseUrl: saved.baseUrl, model: "model-b", apiKey: "" });
@@ -83,4 +83,54 @@ test("设置 API 要求用户凭据；保存不启动模型，下一轮使用新
   reopened = await startService(resolve("."), dir, {});
   assert.equal(reopened.scheduler.env.ANTHROPIC_MODEL, "model-b");
   assert.equal(reopened.scheduler.env.ANTHROPIC_API_KEY, "key-b");
+});
+
+test("YOLO 默认关闭、兼容旧配置、持久化并拒绝非布尔值", t => {
+  const dir = mkdtempSync(join(tmpdir(), "raft-yolo-settings-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const settings = new ModelSettings(dir, {});
+  assert.equal(settings.view().yolo, false);
+  settings.save({ baseUrl: "https://example.com", model: "m", yolo: true });
+  assert.equal(new ModelSettings(dir, {}).view().yolo, true);
+  settings.save({ baseUrl: "https://example.com", model: "other" });
+  assert.equal(settings.view().yolo, true);
+  assert.throws(() => settings.save({ baseUrl: "https://example.com", model: "m", yolo: "false" }), /布尔/);
+  settings.save({ baseUrl: "https://example.com", model: "m", yolo: false });
+  assert.equal(new ModelSettings(dir, {}).view().yolo, false);
+});
+
+test("YOLO 保存切换活动 Query，后续运行继承；切换失败停止旧权限实例", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "raft-yolo-runtime-"));
+  const seen: Options[] = []; const modes: string[] = []; const finish: (() => void)[] = [];
+  let failSwitch = false;
+  const service = await startService(resolve("."), dir, { ANTHROPIC_API_KEY: "test" }, async (_prompt, options, _message, onQuery) => {
+    seen.push(options);
+    onQuery({ setPermissionMode: async (mode: string) => { if (failSwitch) throw new Error("test failure"); modes.push(mode); }, interrupt: async () => undefined } as unknown as import("@anthropic-ai/claude-agent-sdk").Query);
+    await new Promise<void>(r => { finish.push(r); options.abortController!.signal.addEventListener("abort", () => r(), { once: true }); });
+  });
+  t.after(async () => { await service.close(); rmSync(dir, { recursive: true, force: true }); });
+  const command = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: "user" }, { name, args, requestId: randomUUID() });
+  const waitFor = async (check: () => boolean) => { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(r => setTimeout(r, 10)); } throw new Error("YOLO 切换超时"); };
+  const save = (yolo: boolean) => fetch(`http://127.0.0.1:${service.port}/api/settings`, { method: "POST", headers: { Authorization: `Bearer ${service.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ baseUrl: "https://api.anthropic.com", model: "", yolo }) });
+  const a = command("agent.create", { name: "A", role: "test" }) as Agent;
+  command("direct.send", { agentId: a.id, text: "first" });
+  await waitFor(() => seen.length === 1);
+  assert.equal(seen[0]!.permissionMode, "default");
+  assert.equal(seen[0]!.allowDangerouslySkipPermissions, true);
+  assert.equal((await save(true)).status, 200);
+  assert.deepEqual(modes, ["bypassPermissions"]);
+  command("direct.send", { agentId: a.id, text: "next" });
+  finish[0]!(); await waitFor(() => seen.length === 2);
+  assert.equal(seen[1]!.permissionMode, "bypassPermissions");
+  assert.equal(seen[1]!.sandbox?.enabled, true);
+  assert.equal(seen[1]!.sandbox?.allowUnsandboxedCommands, false);
+  assert.equal((await save(false)).status, 200);
+  assert.equal(modes.at(-1), "default");
+  await save(true); failSwitch = true;
+  const failure = await save(false);
+  assert.equal(failure.status, 500);
+  assert.match(await failure.text(), /已停止/);
+  await waitFor(() => service.scheduler.active.size === 0);
+  assert.equal(service.store.state.agents[0]!.status, "stopped");
+  assert.equal(new ModelSettings(dir, {}).view().yolo, false);
 });

@@ -5,16 +5,23 @@ import type { Command } from "./contracts.js";
 export const controlHelp = `raftctl — 本地协作命令（所有结果为 JSON）
   web search --query TEXT [--limit 5] [--time-range day|week|month|year] [--domains example.com,example.org]
   web fetch --url URL [--max-chars 12000]  通过 Tavily 提取公网网页正文
-  skill publish --source DIR --request-id ID  发布/更新当前 Agent 的 Skill 并热加载
-  skill list                               查询当前 Agent 已发布的 Skills
+  skill publish --source DIR --request-id ID  发布/更新自己维护的共享 Skill，并为自己启用及热加载
+  skill list                               查询当前 Agent 已启用的 Skills
+  skill catalog                            查看共享 Skill 目录
   skill reload                             重新加载当前 Query 的 Skills
-  skill remove --name NAME --request-id ID  移除 Skill 并刷新当前 Query
+  skill remove --name NAME --request-id ID  停用当前 Agent 的 Skill（保留共享文件）
   agent create --name NAME --system-prompt TEXT [--task TEXT] [--room ID] --request-id ID
   agent list                              查看自己创建的子 Agent
   agent status --id ID                     查看子 Agent 状态与最近委派结果
   agent send --id ID --task TEXT [--room ID] --request-id ID
-  inbox list [--room ID] [--cursor ID]      查询未读消息及房间版本
-  inbox ack --ids ID,ID --request-id ID    确认已读
+  room list [--limit 20] [--cursor ID]     已加入群的目录，不含正文
+  room inspect --room ID                 群状态与有界近期原文摘要
+  message list [--room ID | --scope private|joined] [--unread] [--mentioned] [--after-seq N] [--limit 20] [--cursor TOKEN]
+  message search --query TEXT [--room ID | --scope private|joined] [--match all|any] [--sender ID] [--since ISO] [--until ISO] [--unread] [--mentioned] [--limit 20] [--cursor TOKEN]
+  message context --id ID [--before 3] [--after 3]  展开同场景邻近消息
+  message get --id ID [--offset 0] [--max-chars 12000]  分段读取完整长正文
+  inbox list [--room ID] [--after-version N] [--limit 20] [--cursor TOKEN]  共享群消息与版本；私聊返回私有通知
+  inbox ack --ids ID,ID --request-id ID    确认私有通知；不删除共享群消息
   room changes --room ID [--cursor N]     分页查询群历史
   room send --room ID --based-on N --body TEXT [--mentions ID,ID] --request-id ID
   draft resolve --id ID --action retry|revise|discard|force [--based-on N] [--body TEXT] --request-id ID
@@ -46,14 +53,16 @@ export async function controlCommand(argv: string[], stdin: () => Promise<string
     }
     return { name: `web.${verb}`, args };
   }
-  const allowed = new Set(["room", "cursor", "ids", "based-on", "body", "body-file", "mentions", "request-id", "id", "action", "text", "expected-version", "evidence", "name", "system-prompt", "system-prompt-file", "task", "task-file", "source"]);
+  const allowed = new Set(["room", "cursor", "ids", "based-on", "body", "body-file", "mentions", "request-id", "id", "action", "text", "expected-version", "evidence", "name", "system-prompt", "system-prompt-file", "task", "task-file", "source", "scope", "query", "match", "sender", "since", "until", "limit", "after-seq", "after-version", "before", "after", "offset", "max-chars", "unread", "mentioned"]);
   const values: Record<string, unknown> = {};
   for (let i = 0; i < flags.length; i++) {
     const key = flags[i]!; if (key === "--json") continue;
     if (!key.startsWith("--") || !allowed.has(key.slice(2))) throw new Error(`未知选项 ${key}`);
-    const value = flags[++i]; if (value === undefined) throw new Error(`${key} 缺少值`);
     const name = key.slice(2).replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
-    values[name] = ["basedOn", "expectedVersion"].includes(name) ? Number(value) : ["ids", "mentions"].includes(name) ? value.split(",").filter(Boolean) : value;
+    if (values[name] !== undefined) throw new Error(`${key} 重复`);
+    if (["unread", "mentioned"].includes(name)) { values[name] = true; continue; }
+    const value = flags[++i]; if (value === undefined || value.startsWith("--")) throw new Error(`${key} 缺少值`);
+    values[name] = ["basedOn", "expectedVersion", "limit", "afterSeq", "afterVersion", "before", "after", "offset", "maxChars"].includes(name) ? Number(value) : ["ids", "mentions"].includes(name) ? value.split(",").filter(Boolean) : value;
   }
   const files = [["body", "bodyFile"], ["systemPrompt", "systemPromptFile"], ["task", "taskFile"]] as const;
   if (files.filter(([, file]) => values[file] === "-").length > 1) throw new Error("stdin 只能用于一个输入字段");

@@ -3,17 +3,18 @@ import type { ModelSettingsView } from "../src/contracts";
 
 export function SettingsDialog({ load, save, close }: {
   load: () => Promise<ModelSettingsView>;
-  save: (value: { baseUrl: string; model: string; apiKey: string; clearApiKey: boolean }) => Promise<ModelSettingsView>;
+  save: (value: { baseUrl: string; model: string; apiKey: string; clearApiKey: boolean; yolo: boolean }) => Promise<ModelSettingsView>;
   close: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [current, setCurrent] = useState<ModelSettingsView>();
   const [baseUrl, setBaseUrl] = useState(""); const [model, setModel] = useState(""); const [apiKey, setApiKey] = useState("");
+  const [yolo, setYolo] = useState(false);
   const [showKey, setShowKey] = useState(false); const [clearKey, setClearKey] = useState(false);
   const [saving, setSaving] = useState(false); const [error, setError] = useState(""); const [success, setSuccess] = useState(false);
   useEffect(() => {
     dialog.current?.showModal(); let cancelled = false;
-    void load().then(value => { if (!cancelled) { setCurrent(value); setBaseUrl(value.baseUrl); setModel(value.model); } }).catch(() => { if (!cancelled) setError("无法加载设置，请关闭后重试。"); });
+    void load().then(value => { if (!cancelled) { setCurrent(value); setBaseUrl(value.baseUrl); setModel(value.model); setYolo(value.yolo); } }).catch(() => { if (!cancelled) setError("无法加载设置，请关闭后重试。"); });
     return () => { cancelled = true; };
   }, []);
   const edit = () => { setSuccess(false); setError(""); };
@@ -21,8 +22,8 @@ export function SettingsDialog({ load, save, close }: {
     <form onSubmit={async event => {
       event.preventDefault(); setSaving(true); setError(""); setSuccess(false);
       try {
-        const next = await save({ baseUrl, model, apiKey, clearApiKey: clearKey });
-        setCurrent(next); setBaseUrl(next.baseUrl); setModel(next.model); setApiKey(""); setShowKey(false); setClearKey(false); setSuccess(true);
+        const next = await save({ baseUrl, model, apiKey, clearApiKey: clearKey, yolo });
+        setCurrent(next); setYolo(next.yolo); setBaseUrl(next.baseUrl); setModel(next.model); setApiKey(""); setShowKey(false); setClearKey(false); setSuccess(true);
       } catch (error) { setError(error instanceof Error ? error.message : "保存失败，请重试。"); }
       finally { setSaving(false); }
     }}>
@@ -41,10 +42,14 @@ export function SettingsDialog({ load, save, close }: {
           <label htmlFor="llm-model">模型名称</label>
           <input id="llm-model" autoComplete="off" spellCheck={false} maxLength={256} value={model} onChange={e => { edit(); setModel(e.target.value); }} placeholder="例如：claude-sonnet-4-5 或服务商模型 ID" />
           <p className="field-hint">留空使用默认模型；火山方舟需填写模型 ID 或推理接入点 ID。</p>
+          <div className="yolo-setting">
+            <div><label htmlFor="yolo-mode">YOLO 模式</label><p id="yolo-description">适用于所有 Agent，自动批准普通工具操作。Bash 沙箱保持开启。</p></div>
+            <input id="yolo-mode" className="yolo-switch" type="checkbox" role="switch" aria-describedby="yolo-description" checked={yolo} onChange={e => { edit(); setYolo(e.target.checked); }} />
+          </div>
         </fieldset>
-        <div className="settings-note">保存后从下一次执行生效，无需重启。正在运行的任务继续使用原配置。</div>
+        <div className="settings-note">模型配置下次执行生效。YOLO 保存后应用于当前及后续执行；已有授权请求仍需处理，关闭不会撤销已开始的操作。</div>
         {error && <p className="form-error" role="alert">{error}</p>}
-        {success && <p className="settings-success" role="status">{current.hasApiKey ? "配置已保存，下次执行生效。" : "配置已保存，填写 API Key 后可运行 Agent。"}</p>}
+        {success && <p className="settings-success" role="status">{current.hasApiKey ? "配置已保存，YOLO 设置已应用；模型配置下次执行生效。" : "配置已保存，填写 API Key 后可运行 Agent。"}</p>}
         <div className="settings-actions"><button type="button" className="secondary" disabled={saving} onClick={close}>关闭</button><button type="submit" className="primary" disabled={saving}>{saving ? "正在保存…" : "保存配置"}</button></div>
       </>}
     </form>

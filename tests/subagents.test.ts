@@ -88,7 +88,7 @@ test("本地 CLI 创建后调度独立 SDK 配置，子任务结果只返回父 
   const wait = async (n: number) => { for (let i = 0; i < 100; i++) { if (service.store.state.receipts.filter(r => r.agentId === parent.id).length >= n) return; await new Promise(r => setTimeout(r, 10)); } throw new Error("子任务未完成"); };
   await wait(1);
   assert.match(String(seen[0]!.systemPrompt), /UNIQUE_CHILD_PROMPT/); assert.equal(seen[0]!.resume, undefined);
-  assert.equal(service.store.state.agents.find(a => a.id === child.id)!.sessionId, "child-session");
+  assert.equal(service.store.state.sessions!.find(s => s.agentId === child.id && s.channel === child.id)!.sdkSessionId, "child-session");
   const resultMessage = service.store.state.messages.find(m => m.id.startsWith("delegation:"))!;
   assert.equal(resultMessage.channel, parent.id); assert.equal(resultMessage.sender, child.id); assert.match(resultMessage.text, /完成：first-task/);
   assert.equal(service.store.state.receipts[0]!.read, false);
