@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
-import { sharedInbox } from '../src/shared-inbox.js';
+import { requestState, requestForMessage, requestForInput, inboxItem } from '../src/request-context.js';
+import { sharedInbox, inboxSummary } from '../src/shared-inbox.js';
 import { nextSceneInput, sceneKey } from '../src/conversation-context.js';
 import { controlCommand, sendControl } from '../src/control.js';
 import { startService } from '../src/server.js';
@@ -26,6 +27,108 @@ function fixture(t: test.TestContext, persistent = false) {
   store.transact(s => { s.agents[0]!.status = 'running'; s.runs.push({ id: 'run', agentId: a.id, inputId: 'i', status: 'running', channel: room.id, at: 'now' }); });
   return { store, close, dir, path, exec, a, b, room, actor };
 }
+test('同一请求每位成员独立回应；重复正文需要明确新增贡献，新请求可再次回应', t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  exec('room.send', { room: room.id, body: 'hello' });
+  const requestId = store.state.messages[0]!.id;
+  store.transact(s => { s.runs[0]!.replyToRequestId = requestId; });
+  const send = (body: string) => exec('room.send', { room: room.id, body, basedOn: store.state.rooms[0]!.version }, actor) as { status: string; draftId: string };
+  assert.equal(send('hello A').status, 'committed');
+  const held = send('hello again');
+  assert.equal(held.status, 'held');
+  assert.equal(requestState(store.state, a.id, requestId)!.status, 'answered');
+  const memberReply: Message = { id: randomUUID(), channel: room.id, sender: b.id, text: 'hello B', mentions: [], at: 'now', basedOn: 2, replyToRequestId: requestId };
+  store.transact(s => assert.equal(store.publishReply(s, memberReply).status, 'committed'));
+  assert.equal(inboxItem(store.state, a.id, store.state.messages.at(-1)!).request!.status, 'answered');
+  assert.equal((exec('draft.resolve', { id: held.draftId, action: 'force' }, actor) as { status: string }).status, 'held');
+  assert.equal((exec('draft.resolve', { id: held.draftId, action: 'revise', body: 'new evidence', contribution: 'new evidence', basedOn: 3 }, actor) as { status: string }).status, 'committed');
+  assert.equal(store.state.messages.at(-1)!.replyToRequestId, requestId);
+  exec('room.send', { room: room.id, body: 'hello' });
+  const freshId = store.state.messages.at(-1)!.id;
+  assert.notEqual(freshId, requestId);
+  store.transact(s => { s.runs[0]!.replyToRequestId = freshId; });
+  assert.equal(send('hello fresh').status, 'committed');
+  assert.equal(requestForMessage(store.state, { ...store.state.messages.at(-1)!, replyToRequestId: undefined }), freshId);
+});
+test('自动正文冲突暂存，重试继续检查版本，静默丢弃草稿', t => {
+  const { store, exec, a, room, actor } = fixture(t);
+  exec('room.send', { room: room.id, body: 'start' });
+  const message: Message = { id: randomUUID(), runId: 'run', channel: room.id, sender: a.id, text: 'stale', mentions: [], at: 'now', basedOn: 1, replyToRequestId: store.state.messages[0]!.id };
+  exec('room.send', { room: room.id, body: 'changed' });
+  store.transact(s => assert.equal(store.publishReply(s, message).status, 'held'));
+  exec('room.send', { room: room.id, body: 'changed again' });
+  const draft = store.state.drafts[0]!;
+  assert.equal((exec('draft.resolve', { id: draft.id, action: 'retry', basedOn: 2 }, actor) as { status: string }).status, 'held');
+  assert.equal(store.state.messages.filter(m => m.sender === a.id).length, 0);
+  exec('room.silence', {}, actor);
+  assert.equal(store.state.drafts[0]!.status, 'discarded');
+  assert.equal(store.state.rooms[0]!.version, 3);
+});
+test('版本冲突反馈携带最新 inbox、本人回应状态和可执行命令，分页不消费通知', async t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  exec('room.send', { room: room.id, body: '各位打个招呼' });
+  const requestId = store.state.messages[0]!.id;
+  store.transact(s => {
+    s.runs[0]!.replyToRequestId = requestId;
+    for (let i = 0; i < 22; i++) store.message(s, s.rooms[0]!, b.id, `peer ${i}`, []);
+  });
+  const result = exec('room.send', { room: room.id, body: 'my first reply', basedOn: 1 }, actor) as ReturnType<Store['heldFeedback']>;
+  assert.equal(result.reason, 'room_changed');
+  assert.equal(result.request!.status, 'not_answered');
+  assert.equal(result.inbox.messages.length, 20);
+  assert.equal(result.inbox.messages[0]!.text, 'peer 0');
+  assert.equal(result.inbox.version, 23);
+  assert.ok(result.commands.nextPage);
+  const next = exec('inbox.list', { room: room.id, afterVersion: 1, limit: 20, cursor: result.inbox.nextCursor }, actor) as typeof result.inbox;
+  assert.equal(next.messages.length, 2);
+  assert.equal(inboxSummary(store.state, a.id, store.state.rooms[0]!).count, 23);
+  assert.match(result.commands.retry, /draft resolve --id /);
+  assert.doesNotMatch(result.commands.retry, /--draft-id/);
+  const parsed = await controlCommand(['draft', 'resolve', '--id', result.draftId, '--action', 'retry', '--based-on', '23', '--request-id', 'retry'], async () => '');
+  assert.equal((store.execute(actor, parsed) as { status: string }).status, 'committed');
+  assert.equal(store.state.messages.at(-1)!.text, 'my first reply');
+});
+test('按 ID 展开不吞掉其它新增消息，也不假装看过最新版本', t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  store.transact(s => { s.runs[0]!.observedVersion = 0; });
+  exec('room.send', { room: room.id, body: 'x'.repeat(9000) });
+  const id = store.state.messages[0]!.id;
+  exec('room.send', { room: room.id, body: 'new' });
+  const result = exec('view_inbox', { ids: [id] }, actor) as { messages: (Message & { nextOffset: number })[] };
+  assert.equal(result.messages[0]!.text.length, 6000);
+  assert.equal(result.messages[0]!.nextOffset, 6000);
+  assert.equal(inboxSummary(store.state, a.id, store.state.rooms[0]!).count, 2);
+  assert.equal(store.state.runs[0]!.observedVersion, 0);
+  exec('view_inbox', { limit: 1 }, actor);
+  assert.equal(store.state.runs[0]!.observedVersion, 0);
+  const other = exec('room.create', { name: 'other', members: [a.id, b.id] }) as Room;
+  exec('room.send', { room: other.id, body: 'other' });
+  assert.throws(() => exec('view_inbox', { ids: [store.state.messages.at(-1)!.id] }, actor), /当前群/);
+  exec('view_inbox', {}, actor);
+  assert.equal(store.state.runs[0]!.observedVersion, 2);
+});
+test('新用户请求优先于旧请求的迟到回复，内部通知保留独立正文', t => {
+  const { store, exec, a, b, room } = fixture(t);
+  exec('room.send', { room: room.id, body: 'old' });
+  const old = store.state.messages[0]!.id;
+  exec('room.send', { room: room.id, body: 'new' });
+  const fresh = store.state.messages[1]!.id;
+  store.transact(s => {
+    s.messages.push({ id: 'late', channel: room.id, sender: b.id, text: 'old reply', replyToRequestId: old, mentions: [], seq: ++s.seq, at: 'now' });
+  });
+  assert.equal(requestForInput(store.state, room.id, [fresh, 'late']), fresh);
+  assert.equal(requestForInput(store.state, room.id, ['late']), old);
+  store.transact(s => {
+    (s.roomInboxCursors ??= {})[sceneKey(a.id, room.id)] = s.seq;
+    s.messages.push({ id: 'private', channel: a.id, sender: b.id, text: 'p'.repeat(300), mentions: [], seq: ++s.seq, at: 'now' });
+    s.receipts.push({ messageId: 'private', agentId: a.id, read: false, arrival: s.seq });
+  });
+  const notification = nextSceneInput(store.state, a.id)!;
+  assert.equal(notification.channel, a.id);
+  assert.ok(notification.text.includes('p'.repeat(300)));
+  assert.ok(!notification.text.includes('view_inbox'));
+  assert.equal(requestForMessage(store.state, { ...store.state.messages.at(-1)!, internalFor: a.id }), undefined);
+});
 test('共享 inbox 按版本增量分页，快照不混入后续消息，成员 ack 不修改公共流', t => {
   const { store, exec, room, actor } = fixture(t);
   for (let i = 0; i < 5; i++) exec('room.send', { room: room.id, body: `消息${i}` });
@@ -40,28 +143,31 @@ test('共享 inbox 按版本增量分页，快照不混入后续消息，成员 
   assert.throws(() => exec('inbox.list', { afterVersion: 99 }, actor), /afterVersion/);
   assert.equal(store.state.receipts.length, 0);
 });
-test('群普通文本禁止自动发布，显式发送版本冲突留草稿，内部结果单独返回', t => {
+test('群普通文本自动发布，显式发送版本冲突留草稿，内部结果单独返回', t => {
   const { store, exec, a, b, room, actor } = fixture(t);
   const make = (text: string, basedOn: number): Message => ({ id: randomUUID(), channel: room.id, sender: a.id, text, basedOn, mentions: [], at: new Date().toISOString() });
   exec('room.send', { room: room.id, body: '目标' });
-  assert.throws(() => store.transact(s => store.publishReply(s, make('保持沉默', 1))), /显式发布/);
-  exec('room.send', { room: room.id, body: '新增贡献', basedOn: 1 }, actor);
+  const reply = make('正文自动公开', 1);
+  store.transact(s => store.publishReply(s, reply));
+  store.transact(s => store.publishReply(s, reply));
+  assert.equal(store.state.rooms[0]!.version, 2);
+  exec('room.send', { room: room.id, body: '新增贡献', basedOn: 2, mentions: [b.id] }, actor);
   const result = exec('room.send', { room: room.id, body: '过时贡献', basedOn: 1 }, actor) as { status: string };
-  assert.equal(result.status, 'held'); assert.equal(store.state.rooms[0]!.version, 2);
-  assert.equal(store.state.messages.length, 2); assert.equal(store.state.drafts.length, 1);
+  assert.equal(result.status, 'held'); assert.equal(store.state.rooms[0]!.version, 3);
+  assert.equal(store.state.messages.length, 3); assert.equal(store.state.drafts.length, 1);
   const input = nextSceneInput(store.state, b.id)!;
-  assert.equal(input.roomVersion, 2); assert.match(input.text, /新增贡献/);
+  assert.equal(input.roomVersion, 3); assert.match(input.text, /新增贡献/);
   store.transact(s => { s.sceneNotices![sceneKey(b.id, room.id)] = input.noticeThrough!; });
   assert.equal(nextSceneInput(store.state, b.id), undefined, '沉默不推进共享版本，不重复唤醒');
   store.transact(s => { s.messages.push({ id: 'private-result', channel: room.id, sender: b.id, text: '内部结果', internalFor: a.id, mentions: [], at: 'now' }); s.receipts.push({ messageId: 'private-result', agentId: a.id, read: false, arrival: ++s.seq }); });
   const inbox = exec('inbox.list', {}, actor) as ReturnType<typeof sharedInbox> & { notifications: Message[] };
-  assert.deepEqual(inbox.messages.map(m => m.text), ['目标', '新增贡献']);
+  assert.deepEqual(inbox.messages.map(m => m.text), ['目标', '正文自动公开', '新增贡献']);
   assert.equal(inbox.notifications[0]!.text, '内部结果');
-  assert.equal(inbox.version, 2);
+  assert.equal(inbox.version, 3);
 });
 test('旧群收件记录迁移只保留一份公共消息，私有回执与处理游标保留，重启幂等', t => {
   const { store, close, exec, path, dir, a, b, room } = fixture(t, true);
-  exec('room.send', { room: room.id, body: '旧公共消息' });
+  exec('room.send', { room: room.id, body: '旧公共消息', mentions: [b.id] });
   const message = store.state.messages[0]!;
   store.transact(s => {
     delete s.sharedInboxVersion; delete s.rooms[0]!.memberSince; delete s.messages[0]!.roomVersion;
@@ -86,27 +192,76 @@ test('CLI 接受版本游标；跨成员和跨群查询仍按身份授权', asyn
   const room = exec('room.create', { name: 'hidden', members: [b.id] }) as Room;
   assert.throws(() => exec('inbox.list', { room: room.id }, actor), /权限/);
 });
-test('群 SDK 普通流与结束结果不发布；CLI 冲突当轮修订，发送重试幂等', async t => {
+test('未处理草稿持续回到同一 Stop 循环，每次附带最新 inbox', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'raft-stop-inbox-'));
+  let checked = false, calls = 0;
+  const service = await startService(resolve('.'), dir, { ANTHROPIC_API_KEY: 'test' }, async (_prompt, options, emit) => {
+    const actor = service.scheduler.tokens.get(options.env!.RAFT_RUN_TOKEN!)!;
+    if (actor.kind !== 'agent') throw new Error('missing actor');
+    if (++calls > 1) {
+      await sendControl({ name: 'view_inbox', args: {}, requestId: randomUUID() }, options.env!);
+      await sendControl({ name: 'room.silence', args: {}, requestId: randomUUID() }, options.env!);
+      return;
+    }
+    const roomId = actor.channel;
+    emit({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'greeting', content: [{ type: 'text', text: 'hello' }] } } as SDKMessage);
+    for (let n = 0; n < 5; n++) {
+      service.store.execute({ kind: 'user' }, { name: 'room.send', args: { room: roomId, body: `change ${n}` }, requestId: randomUUID() });
+      const output = await options.hooks!.Stop![0]!.hooks[0]!({ hook_event_name: 'Stop', stop_hook_active: n > 0, session_id: 's', transcript_path: '', cwd: dir }, undefined, { signal: options.abortController!.signal });
+      assert.ok('decision' in output && output.decision === 'block');
+      assert.ok('reason' in output && output.reason!.includes(`change ${n}`));
+      assert.equal(service.store.state.drafts.length, 1, '再次 Stop 不需要生成第二份正文');
+      assert.equal(service.store.state.messages.filter(m => m.sender === actor.agentId).length, 0);
+    }
+    assert.equal((await sendControl({ name: 'view_inbox', args: {}, requestId: randomUUID() }, options.env!)).ok, true);
+    await sendControl({ name: 'room.silence', args: {}, requestId: randomUUID() }, options.env!);
+    checked = true;
+  });
+  t.after(async () => { await service.close(); rmSync(dir, { recursive: true, force: true }); });
+  const exec = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: 'user' }, { name, args, requestId: randomUUID() });
+  const agent = exec('agent.create', { name: 'A', role: 'test' }) as Agent;
+  const room = exec('room.create', { name: 'R', members: [agent.id] }) as Room;
+  exec('room.send', { room: room.id, body: 'greet' });
+  for (let n = 0; n < 300 && (!checked || service.scheduler.active.size); n++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(checked, JSON.stringify(service.store.state.runs));
+  assert.equal(service.store.state.runs.length, 1);
+  assert.equal(service.store.state.drafts[0]!.status, 'discarded');
+});
+test('群 SDK 正文发布且 result 不重复；CLI 冲突修订与静默结束', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'raft-shared-runtime-')); let calls = 0;
   const service = await startService(resolve('.'), dir, { ANTHROPIC_API_KEY: 'test' }, async (_prompt, options, emit) => {
     const actor = service.scheduler.tokens.get(options.env!.RAFT_RUN_TOKEN!)!;
     if (actor.kind !== 'agent') throw new Error();
-    emit({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'silent' } } } as SDKMessage);
-    emit({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '无需回复，保持沉默' } } } as SDKMessage);
+    if (++calls > 1) {
+      const command = { name: 'room.silence', args: {}, requestId: 'same-silence-id' };
+      const result = await sendControl(command, options.env!);
+      assert.equal(result.ok, true);
+      assert.deepEqual(await sendControl(command, options.env!), result);
+      const hook = options.hooks!.PostToolUse![0]!.hooks[0]!;
+      const output = await hook({ hook_event_name: 'PostToolUse', tool_use_id: 'silence', tool_name: 'Bash', tool_input: {}, tool_response: result, session_id: 's', transcript_path: '', cwd: dir }, 'silence', { signal: options.abortController!.signal });
+      assert.equal('continue' in output && output.continue, false);
+      emit({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'after-silence', content: [{ type: 'text', text: '不会公开的结束说明' }] } } as SDKMessage);
+      assert.equal((await sendControl({ name: 'room.send', args: { room: actor.channel, body: '不允许继续', basedOn: 4 }, requestId: randomUUID() }, options.env!)).ok, false);
+      return;
+    }
+    emit({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'public' } } } as SDKMessage);
+    emit({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '正常正文' } } } as SDKMessage);
     assert.equal(service.scheduler.streamingMessages.size, 0);
-    const reply = () => emit({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null, message: { id: 'silent', content: [{ type: 'text', text: '无需回复，保持沉默' }] } } as SDKMessage);
+    const replyId = randomUUID();
+    const reply = () => emit({ type: 'assistant', uuid: replyId, parent_tool_use_id: null, message: { id: 'public', content: [{ type: 'text', text: '正常正文' }] } } as SDKMessage);
     reply();
-    emit({ type: 'result', subtype: 'success', result: '本轮结束' } as SDKMessage);
-    if (++calls > 1) return;
+    const stop = options.hooks!.Stop![0]!.hooks[0]!;
+    await stop({ hook_event_name: 'Stop', stop_hook_active: false, session_id: 's', transcript_path: '', cwd: dir }, undefined, { signal: options.abortController!.signal });
+    emit({ type: 'result', subtype: 'success', result: '正常正文' } as SDKMessage);
     service.store.execute({ kind: 'user' }, { name: 'room.send', args: { room: actor.channel, body: '新的约束' }, requestId: randomUUID() });
     const held = await sendControl({ name: 'room.send', args: { room: actor.channel, body: '旧版本回复', basedOn: 1 }, requestId: randomUUID() }, options.env!);
     assert.equal(held.ok, true);
     const data = held.data as { status: string; draftId: string; currentVersion: number; changes: { messages: { text: string }[] } };
-    assert.equal(data.status, 'held'); assert.equal(data.currentVersion, 2);
-    assert.deepEqual(data.changes.messages.map(m => m.text), ['新的约束']);
+    assert.equal(data.status, 'held'); assert.equal(data.currentVersion, 3);
+    assert.deepEqual(data.changes.messages.map(m => m.text), ['正常正文', '新的约束']);
     const inbox = await sendControl({ name: 'inbox.list', args: {} }, options.env!);
     assert.equal(inbox.ok, true);
-    const command = { name: 'draft.resolve', args: { id: data.draftId, action: 'revise', body: '已经核验新约束', basedOn: (inbox.data as { version: number }).version }, requestId: randomUUID() };
+    const command = { name: 'draft.resolve', args: { id: data.draftId, action: 'revise', contribution: 'Updated constraints', body: '已经核验新约束', basedOn: (inbox.data as { version: number }).version }, requestId: randomUUID() };
     const sent = await sendControl(command, options.env!);
     assert.equal(sent.ok, true); assert.equal((sent.data as { status: string }).status, 'committed');
     assert.deepEqual(await sendControl(command, options.env!), sent);
@@ -121,8 +276,84 @@ test('群 SDK 普通流与结束结果不发布；CLI 冲突当轮修订，发�
   assert.equal(service.scheduler.active.size, 0);
   assert.ok(service.store.state.runs.every(r => r.status === 'done'));
   assert.equal(service.store.state.drafts[0]!.status, 'committed');
-  assert.deepEqual(service.store.state.messages.filter(m => m.sender === a.id).map(m => m.text), ['已经核验新约束']);
-  assert.equal(service.store.state.messages.at(-1)!.roomVersion, 3);
+  assert.deepEqual(service.store.state.messages.filter(m => m.sender === a.id).map(m => m.text), ['正常正文', '已经核验新约束']);
+  assert.equal(service.store.state.messages.at(-1)!.roomVersion, 4);
   assert.equal(calls, 2, '沉默说明不触发新的运行');
   assert.equal(service.scheduler.streamingMessages.size, 0);
+});
+
+test('静默命令限当前群运行，幂等且不改群版本；下一轮可再次静默', async t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  const other = exec('room.create', { name: 'Other', members: [a.id, b.id] }) as Room;
+  assert.throws(() => exec('room.silence', { room: room.id }), /运行身份/);
+  assert.throws(() => exec('room.silence', { room: other.id }, actor), /当前群聊/);
+  assert.throws(() => exec('room.silence', { room: room.id }, { ...actor, channel: a.id }), /当前群聊/);
+  const command = await controlCommand(['room', 'silence', '--request-id', 'silence'], async () => '');
+  const version = store.state.rooms[0]!.version;
+  const result = store.execute(actor, command);
+  assert.deepEqual(store.execute(actor, command), result);
+  assert.deepEqual(exec('request.status', { id: 'silence' }, actor), result);
+  assert.equal(store.state.rooms[0]!.version, version);
+  assert.equal(store.state.messages.length, 0);
+  store.transact(s => { s.runs[0]!.status = 'done'; s.runs.push({ ...s.runs[0]!, id: 'next', status: 'running', silent: false }); });
+  store.execute({ ...actor, runId: 'next' }, command);
+  assert.equal(store.state.runs[1]!.silent, true);
+});
+
+test('成员列表三态独立，view_inbox 消费当前批次、幂等且不删除历史', async t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  assert.equal(inboxSummary(store.state, a.id, room).status, 'none');
+  exec('room.send', { room: room.id, body: '未点名的请求' });
+  assert.equal(inboxSummary(store.state, a.id, room).status, 'new');
+  assert.equal(inboxSummary(store.state, b.id, room).status, 'new');
+  exec('room.send', { room: room.id, body: '给 B 的优先消息', mentions: [b.id] });
+  assert.equal(inboxSummary(store.state, a.id, room).status, 'new');
+  assert.equal(inboxSummary(store.state, b.id, room).status, 'mentioned');
+  const command = await controlCommand(['view_inbox', '--limit', '1', '--request-id', 'view'], async () => '');
+  assert.equal(command.name, 'view_inbox');
+  const result = store.execute(actor, command) as { messages: Message[]; remaining: { count: number } };
+  assert.equal(result.messages.length, 1); assert.equal(result.remaining.count, 1);
+  exec('room.send', { room: room.id, body: '读取后的新消息' });
+  assert.deepEqual(store.execute(actor, command), result, '重试不消费新到达消息');
+  assert.equal(inboxSummary(store.state, a.id, room).count, 2);
+  assert.equal(inboxSummary(store.state, b.id, room).count, 3);
+  exec('view_inbox', {}, actor);
+  assert.equal(inboxSummary(store.state, a.id, room).status, 'none');
+  assert.equal(inboxSummary(store.state, b.id, room).status, 'mentioned');
+  assert.equal(store.state.messages.length, 3);
+  assert.equal(nextSceneInput(store.state, a.id), undefined);
+  assert.equal(nextSceneInput(store.state, b.id)!.messageIds!.length, 3);
+});
+
+test('view_inbox 限当前身份与场景，分页有界，读取后状态持久化', t => {
+  const { store, close, path, dir, exec, a, b, room, actor } = fixture(t, true);
+  const other = exec('room.create', { name: 'Other', members: [a.id, b.id] }) as Room;
+  assert.throws(() => exec('view_inbox', { room: room.id }), /运行身份/);
+  assert.throws(() => exec('view_inbox', { room: other.id }, actor), /当前群/);
+  assert.throws(() => exec('view_inbox', { limit: 0 }, actor), /limit/);
+  for (let i = 0; i < 6; i++) exec('room.send', { room: room.id, body: String(i).repeat(9000) });
+  assert.equal(nextSceneInput(store.state, a.id)!.roomVersion, 4, '有界批次不假装已经观察后续消息');
+  const result = exec('view_inbox', {}, actor) as { messages: (Message & { nextOffset: number })[]; remaining: { count: number } };
+  assert.equal(result.messages.length, 4); assert.equal(result.remaining.count, 2);
+  assert.equal(result.messages[0]!.nextOffset, 6000);
+  assert.equal(nextSceneInput(store.state, a.id)!.messageIds!.length, 2);
+  close();
+  const reopened = new Store(path, dir);
+  assert.equal(inboxSummary(reopened.state, a.id, reopened.state.rooms[0]!).count, 2);
+  assert.equal(inboxSummary(reopened.state, b.id, reopened.state.rooms[0]!).count, 6);
+  reopened.close();
+});
+
+test('view_inbox 不吞掉交错到达的内部委派通知', t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  exec('room.send', { room: room.id, body: '公开一' });
+  store.transact(s => {
+    s.messages.push({ id: 'internal', channel: room.id, sender: b.id, text: '仅父成员可见', internalFor: a.id, mentions: [], seq: ++s.seq, at: 'now' });
+    s.receipts.push({ agentId: a.id, messageId: 'internal', arrival: s.seq, read: false });
+  });
+  exec('room.send', { room: room.id, body: '公开二' });
+  const read = exec('view_inbox', {}, actor) as { messages: Message[] };
+  assert.deepEqual(read.messages.map(m => m.text), ['公开一', '公开二']);
+  assert.deepEqual(nextSceneInput(store.state, a.id)!.messageIds, ['internal']);
+  assert.equal(inboxSummary(store.state, a.id, room).status, 'none');
 });

@@ -62,19 +62,18 @@ try {
   await page.getByLabel('发送消息').waitFor();
   assert.equal(await page.locator('.message-bubble').getByText('这是新的回复', { exact: true }).count(), 1);
   await page.locator('.room-nav').click();
-  await page.getByLabel('输入消息').fill('一起讨论并发边界'); await page.getByLabel('发送消息').click();
+  exec('room.send', { room: room.id, body: '一起讨论并发边界', mentions: [a.id, b.id] });
   await page.getByRole('status', { name: '群成员正在协作' }).waitFor();
   await page.locator('.group-loading').getByText('技术雷达、技术教学', { exact: false }).waitFor();
   assert.equal(await page.locator('.typing-dots').count(), 1);
   assert.equal(await page.locator('.group-loading .avatar').count(), 2);
   assert.equal(await page.locator('.loading-message').count(), 0);
   partial(streams[2]!, '群内正在分析', true); partial(streams[3]!, '我来补充一个例子', true);
-  assert.equal(service.scheduler.streamingMessages.size, 0, '普通群文本不产生公开预览');
+  assert.equal(service.scheduler.streamingMessages.size, 0, '未审核的群草稿不公开');
   const actor = [...service.scheduler.tokens.values()].find(x => x.kind === 'agent' && x.channel === room.id)!;
   service.store.execute(actor, { name: 'room.send', args: { room: room.id, body: '显式发送的群消息', basedOn: service.store.state.rooms.find(r => r.id === room.id)!.version }, requestId: randomUUID() });
   await page.locator('.message-bubble').getByText('显式发送的群消息', { exact: true }).waitFor();
   assert.equal(await page.locator('.streaming-bubble').count(), 0);
-  assert.equal(await page.getByText('我来补充一个例子', { exact: true }).count(), 0);
   await page.screenshot({ path: join(out, 'chat-streaming-group.png'), animations: 'disabled' });
   await page.locator('.nav-item').filter({ hasText: '技术雷达' }).click();
   assert.equal(await page.getByLabel('停止回复').count(), 0, '群运行不占用私聊停止按钮');
@@ -92,5 +91,5 @@ try {
   assert.equal(service.store.state.drafts.length, 0, '停止群运行不保存普通输出为草稿');
   assert.deepEqual(service.store.state.messages.filter(m => m.channel === room.id && m.sender !== 'user').map(m => m.text), ['显式发送的群消息']);
   assert.deepEqual(errors, []);
-  console.log('CHAT_STREAMING_UI_OK: 自动唤醒、三点动画、实时增量、刷新恢复、完整事件去重、私聊停止保留部分内容、群普通输出不发布、显式发送、再次发送、群聊多成员与会话隔离。');
+  console.log('CHAT_STREAMING_UI_OK: 自动唤醒、三点动画、实时增量、刷新恢复、完整事件去重、私聊停止保留部分内容、群草稿不提前公开、显式发送、再次发送、群聊多成员与会话隔离。');
 } finally { await browser.close(); await service.close(); await rm(dir, { recursive: true, force: true }); }

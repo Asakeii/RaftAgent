@@ -63,6 +63,10 @@ export class ReplyStream {
       });
     }
   }
+  discard() {
+    for (const block of this.blocks.values()) { this.live.delete(block.message.id); block.complete = true; }
+    this.changed();
+  }
   close(interrupted: boolean) {
     for (const block of this.blocks.values()) this.finish(block, interrupted);
   }

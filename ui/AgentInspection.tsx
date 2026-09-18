@@ -3,6 +3,7 @@ import type { Agent } from '../src/contracts';
 import type { TraceList, TraceDetail, TraceEvent } from '../src/inspection-contracts';
 export { AgentHistory } from './AgentHistory';
 import './inspection.css';
+import { TraceExplorer } from './TraceExplorer';
 import { useLive } from './useInspectionData';
 
 type Api = (path: string) => Promise<any>;
@@ -48,7 +49,7 @@ function TraceRecord({ api, agentId, conversationId, runId, back, onAgent }: { a
       {!!data?.related.filter(r => r.id !== run.id).length && <div className="trace-related"><span>关联执行</span>{data?.related.filter(r => r.id !== run.id).map(r => <button key={r.id} onClick={() => onAgent(r.agentId, r.id, r.channel)}>{short(r.agentId)} / {short(r.id)} · {states[r.status]} ↗</button>)}</div>}
     </>}
     <div className="inspection-toolbar"><label>级别<select aria-label="筛选日志级别" value={level} onChange={e => setLevel(e.target.value)}><option value="all">全部级别</option><option value="warn">警告</option><option value="error">错误</option><option value="info">信息</option></select></label><input aria-label="搜索已加载日志" placeholder="搜索已加载的事件…" value={query} onChange={e => setQuery(e.target.value)} /></div>
-    <div className="trace-events">{visible.map(event => <article className={`trace-event ${event.level}`} key={event.seq}><div className="trace-dot" /><div className="trace-event-content"><div className="trace-event-title"><strong>{event.summary}</strong><time>{time(event.at)}</time></div><div className="trace-event-meta"><code>{event.kind}</code>{event.toolId && <span title={event.toolId}>调用 {short(event.toolId)}</span>}{event.durationMs !== undefined && <span>{duration(event.durationMs)}</span>}</div>{event.detail !== undefined && <details><summary>查看详情</summary><pre>{typeof event.detail === 'string' ? event.detail : JSON.stringify(event.detail, null, 2)}</pre></details>}</div></article>)}</div>
+    <TraceExplorer events={visible} startedAt={run?.startedAt} />
     {!visible.length && <p className="inspection-footnote">{data ? '没有匹配的已加载事件。' : '正在读取执行日志…'}</p>}
     {data?.nextAfter !== null && data && <button className="secondary" onClick={() => void load()}>加载后续日志</button>}
     <p className="inspection-footnote">已加载 {events.length} 条事件 · 每 2 秒刷新。工具耗时包含授权等待。日志记录 SDK 可观察事件，不等于每次 HTTP 请求的完整报文。</p>

@@ -1,0 +1,81 @@
+import { chromium } from 'playwright';
+import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { startService } from '../src/server.js';
+import type { Agent, Room } from '../src/contracts.js';
+const dir = await mkdtemp(join(tmpdir(), 'raft-monitor-ui-'));
+const service = await startService(resolve('.'), dir, {});
+const browser = await chromium.launch({ channel: 'chrome', headless: true });
+try {
+  const exec = (name: string, args: Record<string, unknown>) => service.store.execute({ kind: 'user' }, { name, args, requestId: randomUUID() });
+  const a = exec('agent.create', { name: '技术雷达', role: '追踪技术资料' }) as Agent;
+  const b = exec('agent.create', { name: '项目简历助手', role: '整理项目经历' }) as Agent;
+  const room = exec('room.create', { name: '秋招工作室', members: [a.id, b.id] }) as Room;
+  const start = Date.now() - 48_000;
+  service.store.transact(state => {
+    state.runs.push({ id: 'timeline-run', agentId: a.id, channel: room.id, inputId: 'timeline-input', at: new Date(start).toISOString(), status: 'done' });
+    state.inputs.push({ id: 'timeline-input', agentId: a.id, channel: room.id, text: '检查项目结构，整理本周技术调研结果', kind: 'room', status: 'done' });
+  });
+  service.traces.start({ contextVersion: 1, id: 'timeline-run', traceId: 'timeline-run', agentId: a.id, channel: room.id, inputId: 'timeline-input', kind: 'room', prompt: '检查项目结构，整理本周技术调研结果', model: 'fixture', baseUrl: 'https://example.com', startedAt: new Date(start).toISOString(), endedAt: new Date(start + 42000).toISOString(), durationMs: 42000, status: 'done', phase: '本轮已结束' });
+  for (const [index, kind, summary] of [[0, 'run.start', '开始处理群聊任务'], [1, 'model.response', '开始接收模型响应'], [2, 'tool.start', '调用 Read · 阅读项目入口'], [3, 'permission.wait', '等待用户授权 Bash'], [4, 'tool.end', 'Bash 已返回 · 完成目录检查'], [5, 'run.end', '执行结束']] as const) {
+    service.traces.append({ runId: 'timeline-run', at: new Date(start + index * 8000).toISOString(), kind, summary, level: 'info', ...(kind === 'tool.end' ? { durationMs: 8000 } : {}) });
+  }
+
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto(service.url);
+  await page.locator('.room-nav').click();
+  await page.getByLabel('输入消息').fill('翻转后仍然保留的草稿');
+  await page.getByRole('button', { name: '监测系统', exact: true }).click();
+  await page.getByRole('heading', { name: 'Agent 监测', exact: true }).waitFor();
+  await page.waitForFunction(() => !document.querySelector('.workspace-flipper')!.getAnimations().length);
+  assert.equal(await page.locator('.workspace-front').getAttribute('inert'), '');
+  assert.equal(await page.locator('.monitor-agent-card').count(), 2);
+  await page.getByRole('button', { name: '会话详情', exact: true }).click();
+  await page.getByText('暂无模型会话').first().waitFor({ timeout: 1500 }).catch(() => {});
+  await page.getByRole('button', { name: '执行日志', exact: true }).click();
+  await page.getByRole('button', { name: '运行概览', exact: true }).click();
+  await page.locator('.run-summary').first().click();
+  await page.getByText('调用 Read · 阅读项目入口', { exact: true }).waitFor();
+  assert.equal(await page.locator('.event-node').count(), 6);
+  await page.getByRole('button', { name: '定位事件 5：Bash 已返回 · 完成目录检查' }).click();
+  await page.getByLabel('选中事件详情').getByText('Bash 已返回 · 完成目录检查', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Raw', exact: true }).click();
+  assert.ok((await page.getByLabel('选中事件详情').innerText()).includes('"durationMs": 8000'));
+  await page.getByLabel('搜索轨迹事件').fill('Read');
+  assert.equal(await page.locator('.explorer-row').count(), 1);
+  await page.getByLabel('搜索轨迹事件').fill('');
+  await page.getByRole('button', { name: '摘要', exact: true }).click();
+
+  assert.ok(await page.locator('.run-event-heading').innerText().then(x => x.includes('42.0 秒')));
+  service.traces.append({ runId: 'timeline-run', at: new Date().toISOString(), kind: 'diagnostic.test', summary: '新增事件实时到达', level: 'warn' });
+  await page.getByText('新增事件实时到达', { exact: true }).waitFor();
+  await page.getByLabel('筛选运行状态').selectOption('running');
+  assert.equal(await page.locator('.run-node').count(), 0);
+  await page.getByLabel('筛选运行状态').selectOption('all');
+  await page.getByText('新增事件实时到达', { exact: true }).waitFor();
+  const out = resolve('.raft/verification'); await mkdir(out, { recursive: true });
+  await page.locator('.run-timeline-section').evaluate(el => el.scrollIntoView({ block: 'start' }));
+  await page.screenshot({ path: join(out, 'timeline-desktop.png') });
+  await page.getByRole('button', { name: '返回工作区', exact: false }).click();
+  await page.waitForFunction(() => !document.querySelector('.workspace-flipper')!.getAnimations().length);
+  assert.equal(await page.getByLabel('输入消息').inputValue(), '翻转后仍然保留的草稿');
+  await page.getByRole('button', { name: '监测系统', exact: true }).click();
+  await page.locator('.run-summary').first().click();
+  await page.getByText('调用 Read · 阅读项目入口', { exact: true }).waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => !document.querySelector('.workspace-flipper')!.getAnimations().length);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.locator('.run-summary').evaluate(el => el.scrollIntoView({ block: 'start' }));
+  await page.screenshot({ path: join(out, 'timeline-mobile.png') });
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.workspace-front').getAttribute('inert'), null);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: '监测系统', exact: true }).click();
+  assert.equal(await page.locator('.workspace-flipper').evaluate(el => getComputedStyle(el).transitionDuration), '0s');
+  assert.deepEqual(errors, []);
+  console.log('TIMELINE_UI_OK');
+} finally { await browser.close(); await service.close(); await rm(dir, { recursive: true, force: true }); }

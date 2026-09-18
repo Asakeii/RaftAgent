@@ -41,6 +41,8 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   const bin = join(dataDir, "bin"); await mkdir(bin, { recursive: true });
   const script = `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "dist/cli.js"))} ctl "$@"\n`;
   await writeFile(join(bin, "raftctl"), script, { mode: 0o700 }); await chmod(join(bin, "raftctl"), 0o700);
+  const inboxScript = `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(root, "dist/cli.js"))} ctl view_inbox "$@"\n`;
+  await writeFile(join(bin, "view_inbox"), inboxScript, { mode: 0o700 });
   const store = new Store(join(dataDir, "raft.sqlite"), resolve(dataDir, "workspaces")); store.recover();
   // Seatbelt 按实际路径匹配 Socket；macOS /var 通常链接到 /private/var。
   const socket = join(await realpath(tmpdir()), `raft-${randomUUID().slice(0, 12)}.sock`);
@@ -77,6 +79,7 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
         const actor = scheduler.tokens.get(request.token);
         if (!actor || closing) throw new DomainError("无有效运行身份或服务正在关闭");
         const command = parseCommand(request.command);
+        if (actor.kind === "agent" && store.state.runs.find(r => r.id === actor.runId)?.silent && (command.name.startsWith("web.") || command.name.startsWith("skill."))) throw new DomainError("本轮已静默结束");
         let data: unknown;
         if (command.name.startsWith("web.")) {
           const running = actor.kind === "agent" ? scheduler.active.get(actor.agentId) : undefined;

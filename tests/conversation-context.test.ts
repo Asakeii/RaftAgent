@@ -254,3 +254,14 @@ test('旧混合 session 归档、新会话映射和通知位置在重启后保�
   assert.equal(sessionFor(store.state, a.id, a.id), 'new');
   assert.ok(store.state.messages[0]!.seq);
 });
+
+test('宿主时间明确本地日期、时区与旧日程解释规则', t => {
+  const { store, a, room } = fixture(t);
+  const now = new Date('2026-09-17T17:48:00Z');
+  const snapshot = contextSnapshot(store.state, a.id, { id: 'clock', agentId: a.id, channel: room.id, kind: 'inbox', text: '', status: 'pending' }, false, now);
+  assert.equal(snapshot.asOf, now.toISOString());
+  assert.equal(snapshot.clock.localTime, now.toLocaleString('sv-SE'));
+  assert.ok(snapshot.clock.timeZone);
+  assert.match(snapshot.clock.policy, /原消息日期/);
+  assert.equal(snapshot.currentRoom!.inbox.status, 'none');
+});

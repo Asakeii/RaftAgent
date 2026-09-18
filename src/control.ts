@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { readFile } from "node:fs/promises";
 import type { Command } from "./contracts.js";
@@ -20,11 +21,13 @@ export const controlHelp = `raftctl — 本地协作命令（所有结果为 JSO
   message search --query TEXT [--room ID | --scope private|joined] [--match all|any] [--sender ID] [--since ISO] [--until ISO] [--unread] [--mentioned] [--limit 20] [--cursor TOKEN]
   message context --id ID [--before 3] [--after 3]  展开同场景邻近消息
   message get --id ID [--offset 0] [--max-chars 12000]  分段读取完整长正文
+  view_inbox [--ids ID,ID] [--room ID] [--limit 20] [--request-id ID]  读取当前群新增列表并消费自己的待检查项
   inbox list [--room ID] [--after-version N] [--limit 20] [--cursor TOKEN]  共享群消息与版本；私聊返回私有通知
   inbox ack --ids ID,ID --request-id ID    确认私有通知；不删除共享群消息
   room changes --room ID [--cursor N]     分页查询群历史
+  room silence [--room ID] --request-id ID  无需回复时结束当前群聊运行，不发布正文
   room send --room ID --based-on N --body TEXT [--mentions ID,ID] --request-id ID
-  draft resolve --id ID --action retry|revise|discard|force [--based-on N] [--body TEXT] --request-id ID
+  draft resolve --id ID --action retry|revise|discard|force [--based-on N] [--body TEXT] [--contribution TEXT] --request-id ID
   activity report --text TEXT --request-id ID
   task list --room ID
   task claim --id ID --expected-version N --request-id ID
@@ -38,6 +41,8 @@ skill publish/remove 的 status 表示持久发布状态；refresh.status=loaded
 held 表示草稿暂存，exit 0 不代表消息已发送。`;
 
 export async function controlCommand(argv: string[], stdin: () => Promise<string>): Promise<Command> {
+  const viewing = argv[0] === "view_inbox";
+  if (viewing) argv = ["inbox", "view", ...argv.slice(1)];
   const [group, verb, ...flags] = argv; if (!group || !verb) throw new Error(controlHelp);
   if (group === "web") {
     const options = verb === "search" ? ["query", "limit", "time-range", "domains"] : verb === "fetch" ? ["url", "max-chars"] : [];
@@ -53,7 +58,7 @@ export async function controlCommand(argv: string[], stdin: () => Promise<string
     }
     return { name: `web.${verb}`, args };
   }
-  const allowed = new Set(["room", "cursor", "ids", "based-on", "body", "body-file", "mentions", "request-id", "id", "action", "text", "expected-version", "evidence", "name", "system-prompt", "system-prompt-file", "task", "task-file", "source", "scope", "query", "match", "sender", "since", "until", "limit", "after-seq", "after-version", "before", "after", "offset", "max-chars", "unread", "mentioned"]);
+  const allowed = new Set(["room", "cursor", "ids", "based-on", "body", "body-file", "mentions", "request-id", "id", "action", "text", "expected-version", "evidence", "name", "system-prompt", "system-prompt-file", "task", "task-file", "source", "scope", "query", "match", "sender", "since", "until", "limit", "after-seq", "after-version", "before", "after", "offset", "max-chars", "unread", "mentioned", "contribution"]);
   const values: Record<string, unknown> = {};
   for (let i = 0; i < flags.length; i++) {
     const key = flags[i]!; if (key === "--json") continue;
@@ -70,8 +75,8 @@ export async function controlCommand(argv: string[], stdin: () => Promise<string
     if (values[field] !== undefined) throw new Error(`${field} 的文本和文件选项不能同时使用`);
     values[field] = values[file] === "-" ? await stdin() : await readFile(String(values[file]), "utf8"); delete values[file];
   }
-  const requestId = values.requestId; delete values.requestId;
-  return { name: `${group}.${verb}`, args: values, ...(typeof requestId === "string" ? { requestId } : {}) };
+  const requestId = values.requestId ?? (viewing ? randomUUID() : undefined); delete values.requestId;
+  return { name: viewing ? "view_inbox" : `${group}.${verb}`, args: values, ...(typeof requestId === "string" ? { requestId } : {}) };
 }
 export async function sendControl(command: Command, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; [key: string]: unknown }> {
   if (!env.RAFT_SOCKET || !env.RAFT_RUN_TOKEN) throw new Error("请从 Agent 的本地 Bash 工具调用 raftctl；缺少运行身份。");

@@ -1,10 +1,33 @@
-import type { AppState, Room } from './contracts.js';
+import type { AppState, Room, Message } from './contracts.js';
 import { DomainError } from './domain-error.js';
 
 export const roomMessages = (s: AppState, roomId: string) => s.messages.filter(m => m.channel === roomId && !m.internalFor);
 export const progressKey = (agentId: string, roomId: string) => JSON.stringify([agentId, roomId]);
-export const roomProgress = (s: AppState, agentId: string, room: Room) => Math.max(room.memberSince?.[agentId] ?? 0, s.sceneNotices?.[progressKey(agentId, room.id)] ?? 0);
-export const pendingRoomMessages = (s: AppState, agentId: string, room: Room) => roomMessages(s, room.id).filter(m => m.sender !== agentId && (m.seq ?? 0) > roomProgress(s, agentId, room));
+export const roomProgress = (s: AppState, agentId: string, room: Room) => Math.max(room.memberSince?.[agentId] ?? 0, s.roomInboxCursors?.[progressKey(agentId, room.id)] ?? s.sceneNotices?.[progressKey(agentId, room.id)] ?? 0);
+/** Each member has an independent pending list; shared history remains single-copy. */
+export const pendingRoomMessages = (s: AppState, agentId: string, room: Room) => roomMessages(s, room.id)
+  .filter(m => m.sender !== agentId && (m.seq ?? 0) > roomProgress(s, agentId, room));
+export function inboxStatus(messages: Message[], agentId: string) {
+  return messages.some(m => m.mentions.includes(agentId)) ? 'mentioned' as const : messages.length ? 'new' as const : 'none' as const;
+}
+export function inboxSummary(s: AppState, agentId: string, room: Room) {
+  const messages = pendingRoomMessages(s, agentId, room);
+  const status = inboxStatus(messages, agentId);
+  return { status, label: { none: '未新增', new: '新增消息', mentioned: '@消息' }[status], count: messages.length,
+    mentionCount: messages.filter(m => m.mentions.includes(agentId)).length,
+    latestMentionSeq: Math.max(0, ...messages.filter(m => m.mentions.includes(agentId)).map(m => m.seq ?? 0)) };
+}
+/** Bound delivered context, retaining source IDs/offsets for explicitly retrieving long bodies. */
+export function inboxBatch(messages: Message[], limit = 20) {
+  const selected: Message[] = []; let chars = 0;
+  for (const m of messages) {
+    const size = Math.min(m.text.length, 6000);
+    if (selected.length && (selected.length >= limit || chars + size > 24000)) break;
+    selected.push(m); chars += size;
+  }
+  return { selected, messages: selected.map(m => ({ ...m, text: m.text.slice(0, 6000), truncated: m.text.length > 6000,
+    totalChars: m.text.length, nextOffset: m.text.length > 6000 ? 6000 : null })) };
+}
 
 /** Same public feed and version for every member. Private notifications are separate. */
 export function sharedInbox(s: AppState, room: Room, args: Record<string, unknown>) {
