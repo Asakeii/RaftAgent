@@ -5,13 +5,14 @@ import { normalizeModelEndpoint } from "./config.js";
 import { DomainError } from "./store.js";
 import type { ModelPricing, ModelSettingsView } from "./contracts.js";
 
-type SavedSettings = { pricing?: ModelPricing | undefined; yolo: boolean; version: 1; baseUrl: string; model: string; apiKey: string };
+type SavedSettings = { evaluatorModel?: string; pricing?: ModelPricing | undefined; yolo: boolean; version: 1; baseUrl: string; model: string; apiKey: string };
 /** 与会话状态分开存储凭据，只向设置页面返回是否配置 Key。 */
 export class ModelSettings {
   readonly env: NodeJS.ProcessEnv;
   readonly path: string;
   private saved = false;
   private yolo = false;
+  private evaluatorModel = "";
   private pricing?: ModelPricing | undefined;
   constructor(dataDir: string, initial: NodeJS.ProcessEnv) {
     this.env = { ...initial };
@@ -26,8 +27,13 @@ export class ModelSettings {
       if (value.version !== 1 || typeof value.baseUrl !== "string" || typeof value.model !== "string" || typeof value.apiKey !== "string") throw new Error();
       if (value.yolo !== undefined && typeof value.yolo !== "boolean") throw new Error();
       const endpoint = normalizeModelEndpoint(value.baseUrl, value.model);
-      this.apply({ pricing: this.parsePricing(value.pricing), yolo: value.yolo === true, version: 1, ...endpoint, apiKey: this.key(value.apiKey) });
+      this.apply({ evaluatorModel: this.parseEvaluatorModel(value.evaluatorModel), pricing: this.parsePricing(value.pricing), yolo: value.yolo === true, version: 1, ...endpoint, apiKey: this.key(value.apiKey) });
     } catch { throw new Error("本地模型配置文件无效，请检查 llm-settings.json 的格式。"); }
+  }
+  private parseEvaluatorModel(value: unknown): string {
+    if (value === undefined) return "";
+    if (typeof value !== "string" || value.length > 256 || /[\x00-\x1f\x7f]/.test(value)) throw new DomainError("评测模型名称无效。");
+    return value.trim();
   }
   private parsePricing(value: unknown): ModelPricing | undefined {
     if (value === undefined || value === null) return undefined;
@@ -43,11 +49,12 @@ export class ModelSettings {
   private apply(value: SavedSettings) {
     Object.assign(this.env, { ANTHROPIC_BASE_URL: value.baseUrl, ANTHROPIC_MODEL: value.model, ANTHROPIC_API_KEY: value.apiKey });
     this.yolo = value.yolo;
+    this.evaluatorModel = value.evaluatorModel ?? "";
     this.pricing = value.pricing;
     this.saved = true;
   }
   view(): ModelSettingsView {
-    return { ...(this.pricing ? { pricing: { ...this.pricing } } : {}), yolo: this.yolo, baseUrl: this.env.ANTHROPIC_BASE_URL?.trim() || "https://api.anthropic.com", model: this.env.ANTHROPIC_MODEL?.trim() || "", hasApiKey: !!this.env.ANTHROPIC_API_KEY?.trim(), source: this.saved ? "saved" : "environment" };
+    return { ...(this.evaluatorModel ? { evaluatorModel: this.evaluatorModel } : {}), ...(this.pricing ? { pricing: { ...this.pricing } } : {}), yolo: this.yolo, baseUrl: this.env.ANTHROPIC_BASE_URL?.trim() || "https://api.anthropic.com", model: this.env.ANTHROPIC_MODEL?.trim() || "", hasApiKey: !!this.env.ANTHROPIC_API_KEY?.trim(), source: this.saved ? "saved" : "environment" };
   }
   save(input: unknown): ModelSettingsView {
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new DomainError("模型配置格式无效。");
@@ -63,7 +70,8 @@ export class ModelSettings {
     if (old.hasApiKey && !replacement && !fields.clearApiKey && endpoint.baseUrl !== old.baseUrl.replace(/\/+$/, "")) throw new DomainError("切换 API 地址时请重新填写 Key，避免将原服务的 Key 用于新地址。");
     const apiKey = fields.clearApiKey ? "" : replacement || this.env.ANTHROPIC_API_KEY?.trim() || "";
     const pricing = fields.pricing === undefined ? (endpoint.model === old.model && endpoint.baseUrl === old.baseUrl.replace(/\/+$/, "") ? this.pricing : undefined) : this.parsePricing(fields.pricing);
-    const next: SavedSettings = { pricing, yolo: fields.yolo as boolean | undefined ?? this.yolo, version: 1, ...endpoint, apiKey };
+    const evaluatorModel = fields.evaluatorModel === undefined ? this.evaluatorModel : this.parseEvaluatorModel(fields.evaluatorModel);
+    const next: SavedSettings = { evaluatorModel, pricing, yolo: fields.yolo as boolean | undefined ?? this.yolo, version: 1, ...endpoint, apiKey };
     const temp = `${this.path}.${randomUUID()}.tmp`;
     try { writeFileSync(temp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600, flag: "wx" }); renameSync(temp, this.path); }
     catch { throw new Error("模型配置保存失败，请检查本地数据目录的写入权限。"); }

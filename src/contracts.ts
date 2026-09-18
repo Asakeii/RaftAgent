@@ -17,6 +17,6 @@ export interface Command { name: string; args: Record<string, unknown>; requestI
 export type Actor = { kind: "user" } | { kind: "agent"; agentId: string; runId: string; channel: string };
 export interface Approval { id: string; agentId: string; tool: string; input: unknown; }
 export interface ModelPricing { input: number; output: number; cacheHit: number; cacheHitEnabled: boolean; }
-export interface ModelSettingsView { pricing?: ModelPricing; yolo: boolean; baseUrl: string; model: string; hasApiKey: boolean; source: "saved" | "environment"; }
+export interface ModelSettingsView { evaluatorModel?: string; pricing?: ModelPricing; yolo: boolean; baseUrl: string; model: string; hasApiKey: boolean; source: "saved" | "environment"; }
 export interface Snapshot { streamingMessages?: Message[]; state: AppState; approvals: Approval[]; ready: boolean; model: string; dataDir: string; }
 export const emptyState = (): AppState => ({ agents: [], rooms: [], messages: [], receipts: [], drafts: [], tasks: [], activities: [], inputs: [], runs: [], notices: {}, contextVersion: 1, sessions: [], sceneNotices: {}, requests: {}, events: [], seq: 0 });

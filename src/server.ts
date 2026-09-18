@@ -8,6 +8,8 @@ import { Store, DomainError } from "./store.js";
 import { Scheduler, type SessionRunner } from "./runtime.js";
 import type { Command, Snapshot } from "./contracts.js";
 import { SkillManager } from "./skills.js";
+import { EvaluationService } from './evaluation.js';
+import type { JudgeRunner } from './evaluation-judge.js';
 import { ModelSettings } from "./model-settings.js";
 import { TavilyService, readTavilyKey } from "./tavily.js";
 import { TraceStore } from "./trace.js";
@@ -27,7 +29,7 @@ export function parseCommand(value: unknown): Command {
   if (x.requestId !== undefined && (typeof x.requestId !== "string" || x.requestId.length > 150)) throw new DomainError("requestId 无效");
   return { name: x.name, args: x.args as Record<string, unknown>, ...(typeof x.requestId === "string" ? { requestId: x.requestId } : {}) };
 }
-export async function startService(root: string, dataDir: string, env: NodeJS.ProcessEnv, runner?: SessionRunner, historyReader?: HistoryReader) {
+export async function startService(root: string, dataDir: string, env: NodeJS.ProcessEnv, runner?: SessionRunner, historyReader?: HistoryReader, judgeRunner?: JudgeRunner) {
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const modelSettings = new ModelSettings(dataDir, env);
   const runtimeEnv = modelSettings.env;
@@ -55,6 +57,7 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   catch (error) { store.close(); await unlink(lockPath); throw error; }
   const traces = new TraceStore(join(dataDir, 'traces.sqlite'));
   const executionTrace = new SkillExecutionTrace(traces, skills);
+  const evaluations = new EvaluationService(dataDir, traces, store, modelSettings, judgeRunner);
   const scheduler = new Scheduler(store, runtimeEnv, socket, root, bin, runner, skills, traces);
   scheduler.yolo = modelSettings.view().yolo;
   scheduler.pricing = () => modelSettings.view().pricing;
@@ -126,6 +129,23 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
       if (url.pathname.startsWith("/api/")) {
         if (req.headers.authorization !== `Bearer ${token}`) { json(401, { error: "未授权" }); return; }
         if (closing) { json(503, { error: "服务正在退出" }); return; }
+        if (url.pathname === '/api/evaluator' && req.method === 'GET') { json(200, evaluations.profile()); return; }
+        const evaluationRoute = url.pathname.match(/^\/api\/agents\/([^/]+)\/traces\/([^/]+)\/evaluations(?:\/([^/]+)\/cancel)?$/);
+        if (evaluationRoute) {
+          const [, agentId, runId, evaluationId] = evaluationRoute;
+          const run = traces.get(runId!);
+          const conversationId = url.searchParams.get('conversationId') || agentId;
+          const agent = store.state.agents.find(a => a.id === agentId);
+          const validScope = conversationId === agentId || conversationId === 'legacy' || store.state.rooms.some(r => r.id === conversationId && r.members.includes(agentId!));
+          if (!agent || !run || run.agentId !== agentId || !validScope || (conversationId === 'legacy' ? run.contextVersion === 1 : run.contextVersion !== 1 || run.channel !== conversationId)) { json(404, { error: '执行记录不存在。' }); return; }
+          if (req.method === 'GET' && !evaluationId) { json(200, { profile: evaluations.profile(), evaluations: evaluations.store.list(runId!) }); return; }
+          if (req.method === 'POST') {
+            if (evaluationId) { evaluations.cancel(evaluationId, runId!); json(200, { ok: true }); }
+            else json(202, evaluations.start(runId!, await body(req)));
+            return;
+          }
+          json(405, { error: '不支持该操作。' }); return;
+        }
         const inspect = url.pathname.match(/^\/api\/agents\/([^/]+)\/(history|traces)(?:\/([^/]+))?$/);
         if (inspect && req.method === 'GET') {
           const agent = store.state.agents.find(a => a.id === inspect[1]);
@@ -219,10 +239,11 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   const close = (): Promise<void> => closePromise ??= (async () => {
     closing = true;
     for (const client of subscribers) client.end(); subscribers.clear();
+    await evaluations.close();
     await scheduler.close();
     await skills.close();
     await Promise.all([new Promise<void>(r => http.close(() => r())), new Promise<void>(r => ipc.close(() => r()))]);
     traces.close(); store.close(); await unlink(socket).catch(() => {}); await unlink(lockPath);
   })();
-  return { url: `http://127.0.0.1:${address.port}/#${token}`, token, port: address.port, store, scheduler, skills, traces, socket, close };
+  return { url: `http://127.0.0.1:${address.port}/#${token}`, token, port: address.port, store, scheduler, skills, traces, evaluations, socket, close };
 }

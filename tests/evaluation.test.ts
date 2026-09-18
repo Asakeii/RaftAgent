@@ -1,0 +1,93 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { startService } from '../src/server.js';
+import { RunObserver } from '../src/trace.js';
+import { evidenceWindows, validateRuleStates, evaluationVerdict } from '../src/evaluation.js';
+import { EvaluationStore } from '../src/evaluation-store.js';
+import { ModelSettings } from '../src/model-settings.js';
+import { judgeOptions, type JudgeRunner } from '../src/evaluation-judge.js';
+import type { Agent } from '../src/contracts.js';
+import type { Evaluation, EvaluationEvidence, RuleState } from '../src/evaluation-contracts.js';
+const input = { objective: '交付结果且遵守约束', rules: [{ text: '结果正确', required: true }] };
+const wait = async (check: () => boolean) => { for (let i = 0; i < 200; i++) { if (check()) return; await new Promise(r => setTimeout(r, 10)); } throw Error('timeout'); };
+async function fixture(t: import('node:test').TestContext, runner: JudgeRunner, count = 15) {
+  const dir = mkdtempSync(join(tmpdir(), 'raft-eval-test-'));
+  const service = await startService(resolve('.'), dir, { ANTHROPIC_API_KEY: 'fixture-key', ANTHROPIC_MODEL: 'original' }, async () => {}, undefined, runner);
+  t.after(async () => { await service.close(); rmSync(dir, { recursive: true, force: true }); });
+  const agent = service.store.execute({ kind: 'user' }, { name: 'agent.create', args: { name: 'Judge test', role: 'test' }, requestId: 'create' }) as Agent;
+  service.traces.start({ id: 'run', traceId: 'trace', inputId: 'input', model: 'fixture', baseUrl: 'https://example.com', agentId: agent.id, channel: agent.id, contextVersion: 1, kind: 'direct', prompt: 'test', startedAt: new Date().toISOString(), status: 'running', phase: 'test' });
+  const observer = new RunObserver(service.traces, 'run', []);
+  for (let i = 0; i < count; i++) observer.event('test.evidence', `证据 ${i}`, { result: i });
+  observer.finish('done');
+  const headers = { Authorization: `Bearer ${service.token}`, 'Content-Type': 'application/json' };
+  const url = `http://127.0.0.1:${service.port}/api/agents/${agent.id}/traces/run/evaluations`;
+  return { service, dir, headers, url, observer };
+}
+const pass: JudgeRunner = async prompt => { const p = JSON.parse(prompt); return { output: { rules: p.rules.map((r: RuleState) => ({ ruleId: r.id, verdict: 'pass', reason: '依据记录', evidenceRefs: [p.evidence[0].id] })) }, costUsd: 0.001 }; };
+test('窗口重叠且无多余尾窗；状态可修正；拒绝伪造证据和遗漏规则', () => {
+  const evidence = Array.from({ length: 18 }, (_, i) => ({ id: `e${i}` } as EvaluationEvidence));
+  const windows = evidenceWindows(evidence); assert.deepEqual(windows.map(w => w.length), [10, 10]); assert.equal(windows[1]![0]!.id, 'e8');
+  const state: RuleState[] = [{ id: 'r1', text: '约束', required: true, verdict: 'unknown', reason: '', evidenceRefs: [] }];
+  const first = validateRuleStates({ rules: [{ ruleId: 'r1', verdict: 'pass', reason: '完成', evidenceRefs: ['e0'] }] }, state, windows[0]!);
+  const last = validateRuleStates({ rules: [{ ruleId: 'r1', verdict: 'fail', reason: '后文推翻', evidenceRefs: ['e0', 'e17'] }] }, first, windows[1]!);
+  assert.equal(evaluationVerdict(last, false), 'fail'); assert.equal(evaluationVerdict(last, true), 'inconclusive');
+  assert.throws(() => validateRuleStates({ rules: [] }, state, evidence));
+  assert.throws(() => validateRuleStates({ rules: [{ ruleId: 'r1', verdict: 'pass', reason: '伪造', evidenceRefs: ['fake'] }] }, state, evidence));
+  assert.equal(evaluationVerdict([], false), 'inconclusive');
+});
+test('全量分页、规则跨窗状态、模型配置快照、鉴权、历史持久化', async t => {
+  const prompts: any[] = []; const models: unknown[] = []; let release!: () => void;
+  const { service, url, headers, dir } = await fixture(t, async (prompt, options) => {
+    const p = JSON.parse(prompt); prompts.push(p); models.push(options.model);
+    if (prompts.length === 1) await new Promise<void>(r => { release = r; });
+    const result = await pass(prompt, options);
+    if (p.finalWindow) (result.output as any).rules[0].verdict = 'fail';
+    return result;
+  }, 220);
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url + '?conversationId=wrong', { headers })).status, 404);
+  assert.equal((await fetch(url, { headers })).status, 200); assert.equal(prompts.length, 0);
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(input) }); assert.equal(response.status, 202);
+  const started = await response.json() as Evaluation;
+  assert.ok(started.evidence.length > 220); assert.throws(() => service.evaluations.start('run', input), /已有评测/);
+  await fetch(`http://127.0.0.1:${service.port}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ baseUrl: 'https://api.anthropic.com', model: 'changed', evaluatorModel: 'judge-new' }) });
+  release(); await wait(() => service.evaluations.store.get(started.id)?.status !== 'running');
+  const result = service.evaluations.store.get(started.id)!;
+  assert.equal(result.status, 'completed'); assert.equal(result.verdict, 'fail');
+  assert.equal(prompts[1].rules[0].verdict, 'pass'); assert.ok(models.every(m => m === 'original'));
+  assert.equal(result.windows[0]!.states[0]!.verdict, 'pass'); assert.equal(result.states[0]!.verdict, 'fail');
+  assert.equal(service.evaluations.profile().model, 'judge-new'); assert.equal(service.store.state.runs.length, 0);
+  const reopened = new EvaluationStore(join(dir, 'evaluations.sqlite')); assert.equal(reopened.get(result.id)?.verdict, 'fail'); reopened.close();
+});
+test('无效引用、截断证据不误判通过；空规则拒绝', async t => {
+  const { service, observer } = await fixture(t, async () => ({ output: { rules: [{ ruleId: 'r1', verdict: 'pass', reason: '假证据', evidenceRefs: ['fake'] }] }, costUsd: 0.01 }));
+  assert.throws(() => service.evaluations.start('run', { ...input, rules: [] }));
+  const value = service.evaluations.start('run', input); await wait(() => service.evaluations.store.get(value.id)?.status !== 'running');
+  assert.equal(service.evaluations.store.get(value.id)?.verdict, 'inconclusive'); assert.equal(service.evaluations.store.get(value.id)?.status, 'failed');
+  observer.event('test', '已截断');
+  const second = await fixture(t, pass, 1); second.observer.event('test', '已截断');
+  const v = second.service.evaluations.start('run', input); await wait(() => second.service.evaluations.store.get(v.id)?.status !== 'running');
+  assert.equal(second.service.evaluations.store.get(v.id)?.verdict, 'inconclusive');
+});
+test('取消评测保留未完成结果；重启恢复 running 为 interrupted', async t => {
+  const { service, dir } = await fixture(t, async (_p, options) => { await new Promise<void>(r => options.abortController!.signal.addEventListener('abort', () => r(), { once: true })); throw Error('aborted'); });
+  const value = service.evaluations.start('run', input); service.evaluations.cancel(value.id, 'run');
+  await wait(() => service.evaluations.store.get(value.id)?.status === 'cancelled');
+  assert.equal(service.evaluations.store.get(value.id)?.verdict, 'inconclusive');
+  service.evaluations.store.save({ ...value, id: 'interrupted' });
+  const reopened = new EvaluationStore(join(dir, 'evaluations.sqlite')); assert.equal(reopened.get('interrupted')?.status, 'interrupted'); assert.equal(reopened.get(value.id)?.status, 'cancelled'); reopened.close();
+});
+test('评测模型持久化与继承；裁判没有业务工具或服务凭据', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'raft-eval-settings-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const settings = new ModelSettings(dir, {});
+  settings.save({ baseUrl: 'https://api.anthropic.com', model: 'main', evaluatorModel: 'judge' });
+  assert.equal(new ModelSettings(dir, {}).view().evaluatorModel, 'judge');
+  settings.save({ baseUrl: 'https://api.anthropic.com', model: 'main' }); assert.equal(settings.view().evaluatorModel, 'judge');
+  settings.save({ baseUrl: 'https://api.anthropic.com', model: 'main', evaluatorModel: '' }); assert.equal(settings.view().evaluatorModel, undefined);
+  assert.throws(() => settings.save({ baseUrl: 'https://api.anthropic.com', model: 'main', evaluatorModel: 'bad\n' }));
+  const options = judgeOptions({ ANTHROPIC_API_KEY: 'test', RAFT_TOKEN: 'secret' }, dir, new AbortController(), ['r1'], 2);
+  assert.deepEqual(options.tools, []); assert.equal(options.env!.RAFT_TOKEN, undefined); assert.equal(options.persistSession, false); assert.equal(options.permissionMode, 'dontAsk');
+});

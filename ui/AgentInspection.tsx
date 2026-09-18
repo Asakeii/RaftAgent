@@ -3,10 +3,11 @@ import type { Agent } from '../src/contracts';
 import type { TraceList, TraceDetail, TraceEvent } from '../src/inspection-contracts';
 export { AgentHistory } from './AgentHistory';
 import './inspection.css';
+import { EvaluationPanel } from './EvaluationPanel';
 import { TraceExplorer } from './TraceExplorer';
 import { useLive } from './useInspectionData';
 
-type Api = (path: string) => Promise<any>;
+type Api = (path: string, data?: unknown) => Promise<any>;
 const time = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '时间未记录';
 const duration = (value?: number) => value === undefined ? '—' : value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
 const short = (value: string) => value.slice(0, 8);
@@ -49,6 +50,7 @@ function TraceRecord({ api, agentId, conversationId, runId, back, onAgent }: { a
         {data.skillUsage.map(s => <p key={`${s.skillId}:${s.skillVersion}`}><strong>{s.skillName}</strong> · {s.skillVersion.slice(0, 10)} · {s.state === 'loaded_only' ? '仅观察到加载' : s.state === 'execution_observed' ? '已观察到执行' : '结果未知'}<br />加载 {s.loaded} / 失败 {s.loadFailed} · 服务返回 {s.serviceReturned} / 失败 {s.serviceFailed} / 重放 {s.replayed} · 进程成功 {s.processSucceeded} / 失败 {s.processFailed} · 未收尾 {s.incomplete}</p>)}
         <p>加载说明不代表使用能力；服务返回和进程成功不代表任务成功。绕过受控入口的执行可能缺少证据。</p>
       </details>}
+      <EvaluationPanel key={run.id} run={run} conversationId={conversationId} api={api} />
       {run.error && <ErrorNotice text={run.error} />}
       {!!data?.related.filter(r => r.id !== run.id).length && <div className="trace-related"><span>关联执行</span>{data?.related.filter(r => r.id !== run.id).map(r => <button key={r.id} onClick={() => onAgent(r.agentId, r.id, r.channel)}>{short(r.agentId)} / {short(r.id)} · {states[r.status]} ↗</button>)}</div>}
     </>}
