@@ -25,6 +25,9 @@ try {
   service.store.transact(s => { s.sessions!.push({ agentId: agent.id, channel: agent.id, sdkSessionId: 'fixture-session' }); s.messages.push({ id: 'chat-fixture', channel: agent.id, sender: agent.id, text: '## 项目梳理\n\n已核对模块入口，可以在右侧查看每轮记录和执行日志。', mentions: [], at }); });
   service.traces.start({ id: 'run-ui-001', traceId: 'run-ui-001', agentId: agent.id, inputId: 'fixture-input', sessionId: 'fixture-session', contextVersion: 1, channel: agent.id, kind: 'direct', prompt: '读取项目说明，梳理模块职责。', model: 'demo-model', baseUrl: 'https://example.com', startedAt: at, status: 'running', phase: '等待模型响应' });
   const observer = new RunObserver(service.traces, 'run-ui-001', []);
+  const skill = service.skills.traceSkill(agent.id, 'raft:tavily-search')!;
+  observer.event('skill.load.start', '开始加载 Skill 说明', skill, { toolId: 'skill-probe' });
+  observer.event('skill.loaded', 'Skill 说明已加载', skill, { toolId: 'skill-probe' });
   observer.event('run.start', '开始执行');
   observer.message({ type: 'system', subtype: 'init', session_id: 'fixture-session', model: 'demo-model' } as SDKMessage);
   observer.message({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 3, error_status: 429, retry_delay_ms: 1000, error: 'rate_limit' } as SDKMessage);
@@ -99,6 +102,8 @@ try {
   assert.equal(await panel.locator('.history-row-toggle[aria-expanded=true]').count(), 0);
   await panel.getByRole('button', { name: '查看本轮执行 ↗' }).first().click();
   const logs = page.getByRole('region', { name: '执行日志' });
+  await logs.getByText('Skill 使用证据（1）', { exact: true }).click();
+  await logs.getByText(/仅观察到加载/).waitFor();
   assert.ok(await composer.isVisible());
   assert.equal(await composer.inputValue(), '保留这段未发送的草稿');
   await logs.getByText('API 请求失败，1 秒后重试', { exact: true }).waitFor();

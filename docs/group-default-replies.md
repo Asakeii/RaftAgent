@@ -6,10 +6,10 @@
 
 1. 公开消息共用一份历史，每个成员维护独立消费位置。消息的来源分为用户请求、成员更新和内部委派结果；空闲成员被拉起时接收预览与请求处理状态，按需用 `view_inbox --ids ID,ID` 展开正文。运行中的新 @ 通过原生 Hooks 提醒。
 2. 每条用户消息的 ID 是独立请求 ID；相同文字的新用户消息仍是新请求。运行与公开回复保存 replyToRequestId；成员更新继承原请求。本人是否已经回答从持久化公开回复派生，和 inbox 是否已消费分开。旧消息只回溯同群此前用户消息，不关联未来请求。
-3. 群运行普通正文暂存在宿主中，不进入公开 streamingMessages。Stop Hook 关闭当前文本块并合并本轮正文，检查生成时观察的群版本和本人是否已经回答该请求。
+3. 群运行普通正文暂存在宿主中，不进入公开 streamingMessages。Stop Hook 等待已开始的文本块收到完整 assistant 事件，再合并本轮正文，检查生成时观察的群版本和本人是否已经回答该请求。
 4. 检查通过后自动发布，无需 room send。版本变化或已回应则保存 held 草稿，返回变化摘要、本人此前回复和操作选项；SDK 原生 Stop `decision: block` 让同一个 query 继续处理。
 5. Agent 选择 retry、revise、discard 或 force。retry/revise 继续检查最新版本；已回应同一请求时必须通过 `--contribution` 说明新增价值，force 也不能绕过这个要求。force 仅显式跳过版本检查，不会自动执行。
-6. 无需回复调用 `raftctl room silence --request-id UNIQUE_ID`。该运行的 held 草稿被丢弃，PostToolUse/PostToolBatch 返回 continue:false，后续正文不发布。已经公开的消息不会撤回。
+6. 无需回复调用 `raftctl room silence --request-id UNIQUE_ID`。该运行的 held 草稿被丢弃，PostToolUse/PostToolBatch 返回 continue:false，后续正文不发布。静默不自动撤回已公开消息；另有 room retract 和界面撤回按钮，见 [消息撤回](message-retraction.md)。
 
 ## 运行与边界
 

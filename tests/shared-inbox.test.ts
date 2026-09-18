@@ -27,6 +27,47 @@ function fixture(t: test.TestContext, persistent = false) {
   store.transact(s => { s.agents[0]!.status = 'running'; s.runs.push({ id: 'run', agentId: a.id, inputId: 'i', status: 'running', channel: room.id, at: 'now' }); });
   return { store, close, dir, path, exec, a, b, room, actor };
 }
+test('撤回隐藏正文、通知其它成员并恢复未回应状态；重试幂等且重启保留', t => {
+  const { store, close, path, dir, exec, a, b, room, actor } = fixture(t, true);
+  exec('room.send', { room: room.id, body: 'request' });
+  const requestId = store.state.messages[0]!.id;
+  store.transact(s => { s.runs[0]!.replyToRequestId = requestId; });
+  exec('room.send', { room: room.id, body: 'HALF_OUTPUT', mentions: [b.id], basedOn: 1 }, actor);
+  const message = store.state.messages.at(-1)!;
+  assert.equal(requestState(store.state, a.id, requestId)!.status, 'answered');
+  store.transact(s => { (s.roomInboxCursors ??= {})[sceneKey(b.id, room.id)] = s.seq; });
+  const command = { name: 'room.retract', args: { id: message.id, reason: 'incomplete' }, requestId: 'retract-one' };
+  const result = store.execute(actor, command);
+  assert.deepEqual(store.execute(actor, command), result);
+  exec('room.retract', { id: message.id }, actor);
+  assert.equal(store.state.rooms[0]!.version, 3);
+  assert.equal(store.state.messages.find(m => m.id === message.id)!.text, '[消息已撤回]');
+  assert.deepEqual(store.state.messages.find(m => m.id === message.id)!.mentions, []);
+  assert.equal(requestState(store.state, a.id, requestId)!.status, 'not_answered');
+  assert.equal(inboxSummary(store.state, b.id, store.state.rooms[0]!).count, 1);
+  assert.match(nextSceneInput(store.state, b.id)!.text, /retraction/);
+  const history = exec('inbox.list', {}, actor);
+  assert.ok(!JSON.stringify(history).includes('HALF_OUTPUT'));
+  exec('room.send', { room: room.id, body: 'complete', basedOn: 3 }, actor);
+  assert.equal(store.state.messages.at(-1)!.text, 'complete');
+  close(); const reopened = new Store(path, dir);
+  assert.ok(reopened.state.messages.find(m => m.id === message.id)!.retractedAt);
+  reopened.close();
+});
+test('撤回鉴权限制发送者和当前群，用户可撤回半截 Agent 正文', async t => {
+  const { store, exec, a, b, room, actor } = fixture(t);
+  exec('room.send', { room: room.id, body: 'user text' });
+  assert.throws(() => exec('room.retract', { id: store.state.messages[0]!.id }, actor), /自己/);
+  store.transact(s => store.message(s, s.rooms[0]!, b.id, 'peer text', []));
+  assert.throws(() => exec('room.retract', { id: store.state.messages.at(-1)!.id }, actor), /自己/);
+  const other = exec('room.create', { name: 'other', members: [a.id] }) as Room;
+  store.transact(s => store.message(s, s.rooms.find(r => r.id === other.id)!, a.id, 'other text', []));
+  assert.throws(() => exec('room.retract', { id: store.state.messages.at(-1)!.id }, actor), /当前群/);
+  const id = store.state.messages[1]!.id;
+  const command = await controlCommand(['room', 'retract', '--id', id, '--reason', 'incomplete', '--request-id', 'withdraw'], async () => '');
+  store.execute({ kind: 'user' }, command);
+  assert.ok(store.state.messages.find(m => m.id === id)!.retractedAt);
+});
 test('同一请求每位成员独立回应；重复正文需要明确新增贡献，新请求可再次回应', t => {
   const { store, exec, a, b, room, actor } = fixture(t);
   exec('room.send', { room: room.id, body: 'hello' });

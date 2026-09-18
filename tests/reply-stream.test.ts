@@ -7,6 +7,26 @@ import { ReplyStream } from '../src/reply-stream.js';
 
 const event = (event: unknown): SDKMessage => ({ type: 'stream_event', event, parent_tool_use_id: null, uuid: randomUUID(), session_id: 'session' }) as SDKMessage;
 const assistant = (id: string, content: unknown[], parent: string | null = null): SDKMessage => ({ type: 'assistant', uuid: randomUUID(), parent_tool_use_id: parent, message: { id, content } }) as SDKMessage;
+test('Stop 提前到达时等待完整 assistant，不把半截增量封口', async () => {
+  const { stream, emit, saved } = fixture();
+  emit({ type: 'message_start', message: { id: 'late' } });
+  emit({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'half' } });
+  const ready = stream.waitForComplete(new AbortController().signal);
+  assert.equal(saved.length, 0);
+  stream.accept(assistant('late', [{ type: 'text', text: 'half and remaining' }]));
+  assert.equal(await ready, true);
+  assert.equal(saved[0]!.text, 'half and remaining');
+});
+test('完整正文等待超时或取消不会发布缓存', async () => {
+  const { stream, emit, saved } = fixture();
+  emit({ type: 'message_start', message: { id: 'broken' } });
+  emit({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'half' } });
+  assert.equal(await stream.waitForComplete(new AbortController().signal, 5), false);
+  const controller = new AbortController();
+  const ready = stream.waitForComplete(controller.signal); controller.abort();
+  assert.equal(await ready, false); stream.discard();
+  assert.equal(saved.length, 0);
+});
 function fixture() {
   const live = new Map<string, Message>(); const saved: Message[] = [];
   const stream = new ReplyStream('run', 'room', 'agent', live, () => {}, m => saved.push(m));

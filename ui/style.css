@@ -25,3 +25,12 @@
 .running-avatar-stack{display:flex;align-items:center;padding-left:5px;flex-shrink:0}.running-avatar-stack .avatar{width:27px;height:27px;margin-left:-5px;border:2px solid #f7f7f7;gap:3px}.running-avatar-stack .avatar i{width:3px;height:6px}
 .running-members{min-width:0;overflow-wrap:anywhere;line-height:1.6}.running-members small{display:block;color:#999;font-size:11px}.group-loading .typing-dots{background:none;padding:0;width:30px;flex-shrink:0}
 .streaming-note{display:block;color:#999;font-size:10px;margin-top:7px}.held-replies{display:block;margin:0 0 20px 35px;padding:8px 12px;border-radius:10px;background:#fff8ee;color:#9a7646;font-size:12px;text-align:left}
+/* Retraction is a visible state, never an apparently complete partial answer. */
+.retract-message{margin-top:5px;padding:2px 6px;border:0;background:transparent;color:var(--muted,#888);font-size:12px;cursor:pointer}
+.retract-message:hover{color:#c34534;text-decoration:underline}
+.retracted-note{display:block;color:var(--muted,#888);font-size:13px}
+.message-mentions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;color:#7154b7;font-size:13px;font-weight:600}
+
+.pricing-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.pricing-fields label { display: grid; gap: 6px; font-size: 12px; }
+.pricing-fields input { min-width: 0; width: 100%; box-sizing: border-box; }

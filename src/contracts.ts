@@ -1,7 +1,7 @@
 export type AgentStatus = "idle" | "running" | "stopped" | "error";
 export interface Agent { id: string; name: string; role: string; systemPrompt?: string; parentAgentId?: string; workspace: string; skillIds?: string[]; sessionId?: string; status: AgentStatus; wakeVersion?: number; error?: string; runs: number; }
 export interface Room { id: string; name: string; members: string[]; version: number; memberSince?: Record<string, number>; }
-export interface Message { replyToRequestId?: string | undefined; contribution?: string; id: string; channel: string; sender: string; text: string; at: string; mentions: string[]; seq?: number; internalFor?: string; legacyContext?: boolean; runId?: string | undefined; roomVersion?: number; basedOn?: number | undefined; delivery?: "streaming" | "interrupted"; }
+export interface Message { retractedAt?: string; retractionReason?: string; retractionOf?: string; replyToRequestId?: string | undefined; contribution?: string; id: string; channel: string; sender: string; text: string; at: string; mentions: string[]; seq?: number; internalFor?: string; legacyContext?: boolean; runId?: string | undefined; roomVersion?: number; basedOn?: number | undefined; delivery?: "streaming" | "interrupted"; }
 export interface Receipt { messageId: string; agentId: string; read: boolean; arrival: number; readAtSeq?: number; }
 export interface ConversationSession { agentId: string; channel: string; sdkSessionId: string; }
 export interface Draft { replyToRequestId?: string | undefined; runId?: string | undefined; holdReason?: "room_changed" | "already_answered"; id: string; roomId: string; agentId: string; body: string; mentions: string[]; basedOn: number; status: "held" | "committed" | "discarded"; }
@@ -16,6 +16,7 @@ export interface AppState { agents: Agent[]; rooms: Room[]; messages: Message[];
 export interface Command { name: string; args: Record<string, unknown>; requestId?: string; }
 export type Actor = { kind: "user" } | { kind: "agent"; agentId: string; runId: string; channel: string };
 export interface Approval { id: string; agentId: string; tool: string; input: unknown; }
-export interface ModelSettingsView { yolo: boolean; baseUrl: string; model: string; hasApiKey: boolean; source: "saved" | "environment"; }
+export interface ModelPricing { input: number; output: number; cacheHit: number; cacheHitEnabled: boolean; }
+export interface ModelSettingsView { pricing?: ModelPricing; yolo: boolean; baseUrl: string; model: string; hasApiKey: boolean; source: "saved" | "environment"; }
 export interface Snapshot { streamingMessages?: Message[]; state: AppState; approvals: Approval[]; ready: boolean; model: string; dataDir: string; }
 export const emptyState = (): AppState => ({ agents: [], rooms: [], messages: [], receipts: [], drafts: [], tasks: [], activities: [], inputs: [], runs: [], notices: {}, contextVersion: 1, sessions: [], sceneNotices: {}, requests: {}, events: [], seq: 0 });

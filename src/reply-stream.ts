@@ -8,6 +8,20 @@ export class ReplyStream {
   private index = 0;
   private blocks = new Map<string, Block>();
   private seen = new Set<string>();
+  private completionWaiters = new Set<() => void>();
+  /** A Stop hook may arrive before the SDK consumer receives the final assistant block. */
+  waitForComplete(signal: AbortSignal, timeoutMs = 5000): Promise<boolean> {
+    const complete = () => [...this.blocks.values()].every(b => b.complete);
+    if (signal.aborted) return Promise.resolve(false);
+    if (complete()) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const finish = (value: boolean) => { clearTimeout(timer); this.completionWaiters.delete(check); signal.removeEventListener('abort', abort); resolve(value); };
+      const check = () => { if (complete()) finish(true); };
+      const abort = () => finish(false);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      this.completionWaiters.add(check); signal.addEventListener('abort', abort, { once: true });
+    });
+  }
   constructor(private runId: string, private channel: string, private sender: string,
     private live: Map<string, Message>, private changed: () => void,
     private commit: (message: Message) => void, private prepare: (message: Message) => void = () => {}) {}
@@ -32,6 +46,7 @@ export class ReplyStream {
     const message = { ...block.message };
     if (interrupted) message.delivery = 'interrupted'; else delete message.delivery;
     if (message.text) this.commit(message);
+    for (const check of this.completionWaiters) check();
     this.changed();
   }
   accept(message: SDKMessage) {
@@ -65,6 +80,7 @@ export class ReplyStream {
   }
   discard() {
     for (const block of this.blocks.values()) { this.live.delete(block.message.id); block.complete = true; }
+    for (const check of this.completionWaiters) check();
     this.changed();
   }
   close(interrupted: boolean) {

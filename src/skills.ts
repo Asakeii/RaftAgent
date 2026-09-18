@@ -5,6 +5,7 @@ import { parseDocument } from "yaml";
 import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import type { Actor, Command, SharedSkill } from "./contracts.js";
 import { DomainError, required, Store } from "./store.js";
+import { migrateRequestIdGuide } from './request-id-guide.js';
 
 type AgentActor = Extract<Actor, { kind: "agent" }>;
 type SkillQuery = Pick<Query, "reloadSkills">;
@@ -32,6 +33,43 @@ export class SkillManager {
   private release(skill: SharedSkill) { return resolve(this.directory, "releases", skill.id, skill.version); }
   private source(id: string) { return resolve(this.directory, "sources", id); }
   catalogView() { return this.catalog().map(s => ({ ...s, skill: `${s.plugin}:${s.name}`, directory: this.release(s), source: this.source(s.id) })); }
+  async migrateRequestIdGuidance() {
+    const skill = this.catalog().find(s => s.id === 'builtin-raft-collaboration' && s.plugin === 'raft');
+    if (!skill) return;
+    const source = this.source(skill.id);
+    const bundle = this.readDirectory(source);
+    let changed = false;
+    for (const file of bundle.files.filter(f => f.path.endsWith('.md'))) {
+      const original = file.bytes.toString('utf8'); const next = migrateRequestIdGuide(original);
+      if (next !== original) { file.bytes = Buffer.from(next); changed = true; }
+    }
+    const publishedNeedsMigration = this.readDirectory(this.release(skill)).files.some(f => f.path.endsWith('.md') && migrateRequestIdGuide(f.bytes.toString('utf8')) !== f.bytes.toString('utf8'));
+    if (!changed && !publishedNeedsMigration) return;
+    // Called while the service lock is held, before any Query is started.
+    if (changed) this.writeFiles(source, bundle.files, true);
+    await this.execute({ kind: 'user' }, { name: 'skill.publish', args: { id: skill.id }, requestId: `request-guide-${randomUUID()}` }, () => undefined);
+  }
+  traceSkill(agentId: string, name: unknown) {
+    if (typeof name !== 'string') return undefined;
+    const matches = this.records(agentId).filter(s => s.id === name || `${s.plugin}:${s.name}` === name || s.name === name);
+    const skill = matches.length === 1 ? matches[0] : undefined;
+    if (!skill) return undefined;
+    const view = resolve(this.directory, 'views', agentId, skill.plugin, 'skills', skill.name);
+    const root = realpathSync(resolve(this.directory, 'releases', skill.id));
+    const projected = existsSync(view) ? relative(root, realpathSync(view)) : skill.version;
+    const version = /^[a-f0-9]+$/.test(projected) ? projected : skill.version;
+    return { skillId: skill.id, skillVersion: version, skillName: `${skill.plugin}:${skill.name}` };
+  }
+  scriptEntry(agentId: string, name: unknown, script: unknown) {
+    const identity = this.traceSkill(agentId, name);
+    if (!identity) throw new DomainError('Skill 未启用或名称不唯一');
+    if (typeof script !== 'string' || !/^scripts\/[\w./-]+$/.test(script) || script.split('/').includes('..')) throw new DomainError('需要 scripts/ 下的脚本路径');
+    const skill = this.catalog().find(s => s.id === identity.skillId)!;
+    const root = realpathSync(this.release({ ...skill, version: identity.skillVersion }));
+    const path = realpathSync(resolve(root, script));
+    if (!path.startsWith(root + sep) || !lstatSync(path).isFile()) throw new DomainError('脚本越界或不存在');
+    return { ...identity, path, script };
+  }
   private writeFiles(path: string, files: BundleFile[], replace = false) {
     if (existsSync(path) && !replace) return;
     const staging = `${path}.staging-${randomUUID()}`;

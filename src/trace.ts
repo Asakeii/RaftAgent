@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync } from 'node:fs';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { TraceRun, TraceEvent } from './inspection-contracts.js';
+import type { TraceRun, TraceEvent, SkillUsage } from './inspection-contracts.js';
+import { calculateCostCny } from './model-pricing.js';
 import { redact, inspectionText } from './inspection-redaction.js';
 
 export class TraceStore {
@@ -35,7 +36,7 @@ export class TraceStore {
     this.write(() => { const run = this.get(id); if (run) this.db.prepare('UPDATE trace_runs SET json=? WHERE id=?').run(JSON.stringify({ ...run, ...patch }), id); });
   }
   append(event: Omit<TraceEvent, 'seq'>) {
-    this.write(() => { this.db.prepare('INSERT INTO trace_events(run_id,json) VALUES(?,?)').run(event.runId, JSON.stringify(event)); });
+    this.write(() => { this.db.prepare('INSERT INTO trace_events(run_id,json) VALUES(?,?)').run(event.runId, JSON.stringify({ ...event, traceId: this.get(event.runId)?.traceId })); });
   }
   linkMessage(messageId: string, runId: string) {
     this.write(() => { this.db.prepare('INSERT OR IGNORE INTO trace_messages(message_id,run_id) VALUES(?,?)').run(messageId, runId); });
@@ -64,6 +65,49 @@ export class TraceStore {
   }
   related(traceId: string): TraceRun[] {
     return this.db.prepare("SELECT json FROM trace_runs WHERE json_extract(json,'$.traceId')=? ORDER BY ordinal").all(traceId).map(row => JSON.parse(String(row.json)) as TraceRun);
+  }
+  hasScriptRequest(runId: string, requestId: string) {
+    return Boolean(this.db.prepare("SELECT 1 FROM trace_events WHERE run_id=? AND json_extract(json,'$.kind')='script.start' AND json_extract(json,'$.detail.requestId')=? LIMIT 1").get(runId, requestId));
+  }
+  scriptRequestStatus(agentId: string, requestId: string) {
+    const row = this.db.prepare(`SELECT e.json FROM trace_events e JOIN trace_runs r ON r.id=e.run_id
+      WHERE r.agent_id=? AND json_extract(e.json,'$.kind') IN ('script.start','script.end')
+      AND json_extract(e.json,'$.detail.requestId')=? ORDER BY e.seq DESC LIMIT 1`).get(agentId, requestId);
+    if (!row) return undefined;
+    const event = JSON.parse(String(row.json)) as TraceEvent;
+    const detail = event.detail as Record<string, unknown>;
+    return { requestId, runId: event.runId, status: event.kind === 'script.end' ? detail.status : 'unknown',
+      exitCode: event.kind === 'script.end' ? detail.exitCode : null, businessStatus: 'not_verified',
+      instruction: event.kind === 'script.end' ? '这是进程回执，业务结果仍需核验。' : '已授权但尚无完成回执；可能仍在执行或已经执行，禁止盲目重新运行。' };
+  }
+  skillUsage(runId: string): SkillUsage[] {
+    const groups = new Map<string, SkillUsage>();
+    // Read the whole run, independent of event-page limits.
+    for (const row of this.db.prepare('SELECT json FROM trace_events WHERE run_id=? ORDER BY seq').all(runId)) {
+      const event = JSON.parse(String(row.json)) as TraceEvent;
+      const d = event.detail as Record<string, unknown> | undefined;
+      if (!d || typeof d.skillId !== 'string' || typeof d.skillVersion !== 'string') continue;
+      const key = JSON.stringify([d.skillId, d.skillVersion]);
+      let usage = groups.get(key);
+      if (!usage) {
+        usage = { skillId: d.skillId, skillVersion: d.skillVersion, skillName: String(d.skillName ?? d.skillId), loaded: 0, loadFailed: 0, serviceReturned: 0, serviceFailed: 0, replayed: 0, processSucceeded: 0, processFailed: 0, incomplete: 0, state: 'unknown' };
+        groups.set(key, usage);
+      }
+      if (['skill.load.start', 'capability.start', 'script.start'].includes(event.kind)) usage.incomplete++;
+      if (['skill.loaded', 'skill.load.failed', 'capability.end', 'script.end'].includes(event.kind)) usage.incomplete--;
+      if (event.kind === 'skill.loaded') usage.loaded++;
+      if (event.kind === 'skill.load.failed') usage.loadFailed++;
+      if (event.kind === 'capability.end') {
+        if (d.replayed === true) usage.replayed++;
+        else if (d.outcome === 'failed') usage.serviceFailed++;
+        else usage.serviceReturned++;
+      }
+      if (event.kind === 'script.end') {
+        if (d.status === 'process_succeeded') usage.processSucceeded++;
+        else usage.processFailed++;
+      }
+    }
+    return [...groups.values()].map(u => ({ ...u, incomplete: Math.max(0, u.incomplete), state: u.serviceReturned + u.serviceFailed + u.processSucceeded + u.processFailed > 0 ? 'execution_observed' : u.loaded > 0 && u.incomplete === 0 ? 'loaded_only' : 'unknown' }));
   }
   close() { this.db.close(); }
 }
@@ -107,7 +151,9 @@ export class RunObserver {
       this.seen.add(message.uuid);
       this.event('assistant.message', message.error ? '模型返回错误' : '模型输出', { messageId: message.message.id, blocks: message.message.content }, { level: message.error ? 'error' : 'info' });
     } else if (message.type === 'result') {
-      this.store.update(this.runId, { durationMs: message.duration_ms, apiDurationMs: message.duration_api_ms, turns: message.num_turns, usage: redact(message.modelUsage, this.secrets), estimatedCostUsd: message.total_cost_usd });
+      const pricing = this.store.get(this.runId)?.pricing;
+      const costCny = pricing ? calculateCostCny(message.modelUsage, pricing) : undefined;
+      this.store.update(this.runId, { durationMs: message.duration_ms, apiDurationMs: message.duration_api_ms, turns: message.num_turns, usage: redact(message.modelUsage, this.secrets), estimatedCostUsd: message.total_cost_usd, costCny });
       this.event('run.result', message.is_error || message.subtype !== 'success' ? 'SDK 执行未成功' : 'SDK 本轮结束', { subtype: message.subtype, isError: message.is_error, stopReason: message.stop_reason, permissionDenials: message.permission_denials }, { level: message.is_error || message.subtype !== 'success' ? 'error' : 'info' });
     }
   }

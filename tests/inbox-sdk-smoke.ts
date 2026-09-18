@@ -1,6 +1,6 @@
 // Local scripted provider, real SDK Hooks/Bash/CLI/socket. No external model calls.
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -28,10 +28,11 @@ const provider = createServer(async (req, res) => {
     if (n === 0) exec('room.send', { room: room.id, body: `ARRIVED_MENTION_${phase}`, mentions: [agent.id] });
     const held = service.store.state.drafts.find(d => d.status === 'held');
     const tool = (phase === 'tool' && n === 0) || (phase === 'stop' && n === 1) || (phase === 'draft' && (n === 1 || n === 3));
-    let command = `view_inbox --request-id sdk-${phase}`;
-    if (phase === 'stop' && n === 1) command = `raftctl draft resolve --id '${held!.id}' --action discard --request-id discard-stop && ${command}`;
-    if (phase === 'draft' && n === 1) command = `view_inbox --request-id view-draft && raftctl draft resolve --id '${held!.id}' --action retry --based-on ${service.store.state.rooms[0]!.version} --request-id retry-draft`;
-    if (phase === 'draft' && n === 3) command = 'raftctl room silence --request-id silence-draft';
+    let command = `view_inbox`;
+    if (phase === 'tool' && n === 0) command = `raftctl skill run --name raft-local:trace-probe --script scripts/probe.mjs && ${command}`;
+    if (phase === 'stop' && n === 1) command = `raftctl draft resolve --id '${held!.id}' --action discard && ${command}`;
+    if (phase === 'draft' && n === 1) command = `view_inbox && raftctl draft resolve --id '${held!.id}' --action retry --based-on ${service.store.state.rooms[0]!.version}`;
+    if (phase === 'draft' && n === 3) command = 'raftctl room silence';
     const input = { command };
     const block = tool ? { type: 'tool_use', id: `tool_${randomUUID()}`, name: 'Bash', input } : { type: 'text', text: '完成当前工作' };
     const usage = { input_tokens: 100, output_tokens: 20 };
@@ -53,6 +54,13 @@ const port = (provider.address() as import('node:net').AddressInfo).port;
 service = await startService(resolve('.'), dir, { ...process.env, ANTHROPIC_API_KEY: 'test', ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, ANTHROPIC_MODEL: 'claude-sonnet-4-5', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' });
 try {
   agent = exec('agent.create', { name: 'Inbox probe', role: 'test' }) as Agent;
+  const source = join(agent.workspace, 'trace-probe');
+  await mkdir(join(source, 'scripts'), { recursive: true });
+  await writeFile(join(source, 'SKILL.md'), '---\nname: trace-probe\ndescription: sandbox trace test\n---\nUse raftctl skill run.\n');
+  await writeFile(join(source, 'scripts/probe.mjs'), "if (!process.env.RAFT_TRACE_ID || !process.env.RAFT_RUN_ID || !process.env.RAFT_SKILL_VERSION) process.exit(1); console.log('SCRIPT_TRACE_OK');");
+  service.store.transact(s => { s.agents[0]!.status = 'running'; s.runs.push({ id: 'setup', agentId: agent.id, inputId: 'setup', status: 'running', at: 'now' }); });
+  await service.skills.execute({ kind: 'agent', agentId: agent.id, runId: 'setup', channel: agent.id }, { name: 'skill.publish', args: { source }, requestId: 'setup-skill' }, () => undefined);
+  service.store.transact(s => { s.agents[0]!.status = 'idle'; s.runs = s.runs.filter(r => r.id !== 'setup'); });
   room = exec('room.create', { name: 'Inbox', members: [agent.id] }) as Room;
   for (const mode of ['tool', 'stop', 'draft']) {
     phase = mode; step = 0; payloads.length = 0;
@@ -70,6 +78,12 @@ try {
     assert.equal(runs[0]!.status, 'done');
     assert.equal(inboxSummary(service.store.state, agent.id, service.store.state.rooms[0]!).status, 'none');
     const events = service.traces.events(runs[0]!.id).events;
+    assert.ok(events.some(e => e.kind === 'capability.end' && (e.detail as any)?.skillName === 'raft:raft-collaboration'));
+    assert.ok(events.every(e => e.traceId === service.traces.get(runs[0]!.id)!.traceId));
+    if (phase === 'tool') {
+      assert.equal(service.traces.skillUsage(runs[0]!.id).find(s => s.skillName === 'raft-local:trace-probe')!.processSucceeded, 1);
+      assert.ok(payloads.some(p => p.includes('SCRIPT_TRACE_OK')));
+    }
     assert.equal(events.filter(e => e.kind === 'tool.error').length, 0, JSON.stringify(events));
     assert.ok(events.some(e => e.kind === 'tool.end' && JSON.stringify(e.detail).includes(`ARRIVED_MENTION_${phase}`)));
     assert.match(payloads.at(-1)!, new RegExp(`ARRIVED_MENTION_${phase}`));

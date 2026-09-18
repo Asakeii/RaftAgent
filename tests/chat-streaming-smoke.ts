@@ -71,7 +71,7 @@ try {
   partial(streams[2]!, '群内正在分析', true); partial(streams[3]!, '我来补充一个例子', true);
   assert.equal(service.scheduler.streamingMessages.size, 0, '未审核的群草稿不公开');
   const actor = [...service.scheduler.tokens.values()].find(x => x.kind === 'agent' && x.channel === room.id)!;
-  service.store.execute(actor, { name: 'room.send', args: { room: room.id, body: '显式发送的群消息', basedOn: service.store.state.rooms.find(r => r.id === room.id)!.version }, requestId: randomUUID() });
+  service.store.execute(actor, { name: 'room.send', args: { room: room.id, body: '显式发送的群消息', mentions: [b.id], basedOn: service.store.state.rooms.find(r => r.id === room.id)!.version }, requestId: randomUUID() });
   await page.locator('.message-bubble').getByText('显式发送的群消息', { exact: true }).waitFor();
   assert.equal(await page.locator('.streaming-bubble').count(), 0);
   await page.screenshot({ path: join(out, 'chat-streaming-group.png'), animations: 'disabled' });
@@ -90,6 +90,13 @@ try {
   assert.equal(service.scheduler.active.size, 0);
   assert.equal(service.store.state.drafts.length, 0, '停止群运行不保存普通输出为草稿');
   assert.deepEqual(service.store.state.messages.filter(m => m.channel === room.id && m.sender !== 'user').map(m => m.text), ['显式发送的群消息']);
+  const publicReply = page.locator('article.message').filter({ hasText: '显式发送的群消息' });
+  await publicReply.getByLabel('提及的成员').getByText('@技术教学', { exact: true }).waitFor();
+  await publicReply.getByRole('button', { name: /撤回 .* 的消息/ }).click();
+  await page.getByText('消息已撤回 · 用户撤回', { exact: true }).waitFor();
+  assert.equal(await page.locator('.message-bubble').getByText('显式发送的群消息', { exact: true }).count(), 0);
+  await page.reload(); await page.locator('.room-nav').click();
+  await page.getByText('消息已撤回 · 用户撤回', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   console.log('CHAT_STREAMING_UI_OK: 自动唤醒、三点动画、实时增量、刷新恢复、完整事件去重、私聊停止保留部分内容、群草稿不提前公开、显式发送、再次发送、群聊多成员与会话隔离。');
 } finally { await browser.close(); await service.close(); await rm(dir, { recursive: true, force: true }); }

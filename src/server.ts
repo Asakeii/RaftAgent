@@ -11,6 +11,7 @@ import { SkillManager } from "./skills.js";
 import { ModelSettings } from "./model-settings.js";
 import { TavilyService, readTavilyKey } from "./tavily.js";
 import { TraceStore } from "./trace.js";
+import { SkillExecutionTrace } from './skill-trace.js';
 import { readHistory, type HistoryReader } from "./history.js";
 
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -47,11 +48,16 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   // Seatbelt 按实际路径匹配 Socket；macOS /var 通常链接到 /private/var。
   const socket = join(await realpath(tmpdir()), `raft-${randomUUID().slice(0, 12)}.sock`);
   let skills: SkillManager;
-  try { skills = new SkillManager(store, resolve(dataDir, "skills"), join(root, "resources/raft-plugin")); }
+  try {
+    skills = new SkillManager(store, resolve(dataDir, "skills"), join(root, "resources/raft-plugin"));
+    await skills.migrateRequestIdGuidance();
+  }
   catch (error) { store.close(); await unlink(lockPath); throw error; }
   const traces = new TraceStore(join(dataDir, 'traces.sqlite'));
+  const executionTrace = new SkillExecutionTrace(traces, skills);
   const scheduler = new Scheduler(store, runtimeEnv, socket, root, bin, runner, skills, traces);
   scheduler.yolo = modelSettings.view().yolo;
+  scheduler.pricing = () => modelSettings.view().pricing;
   let settingsQueue: Promise<unknown> = Promise.resolve();
   const subscribers = new Set<import("node:http").ServerResponse>();
   let closing = false;
@@ -79,7 +85,14 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
         const actor = scheduler.tokens.get(request.token);
         if (!actor || closing) throw new DomainError("无有效运行身份或服务正在关闭");
         const command = parseCommand(request.command);
+        if (actor.kind !== 'agent' || store.state.runs.find(r => r.id === actor.runId)?.status !== 'running' || store.state.agents.find(a => a.id === actor.agentId)?.status !== 'running') throw new DomainError('运行已结束或被停止');
         if (actor.kind === "agent" && store.state.runs.find(r => r.id === actor.runId)?.silent && (command.name.startsWith("web.") || command.name.startsWith("skill."))) throw new DomainError("本轮已静默结束");
+        if (command.name === 'skill.script.start' || command.name === 'skill.script.finish') {
+          const data = executionTrace.script(actor, command);
+          connection.end(JSON.stringify({ schemaVersion: 1, ok: true, requestId: command.requestId, data }) + '\n'); return;
+        }
+        let replayed = false;
+        const data = await executionTrace.execute(actor, command, async () => {
         let data: unknown;
         if (command.name.startsWith("web.")) {
           const running = actor.kind === "agent" ? scheduler.active.get(actor.agentId) : undefined;
@@ -92,7 +105,14 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
           finally { connection.off("close", disconnect); }
         } else if (command.name.startsWith("skill.")) {
           data = await skills.execute(actor, command, () => scheduler.tokens.get(request.token) === actor && actor.kind === "agent" ? scheduler.active.get(actor.agentId)?.query : undefined);
-        } else data = store.execute(actor, command);
+        } else {
+          data = store.execute(actor, command, () => { replayed = true; });
+          if (command.name === 'request.status' && (data as { status?: string })?.status === 'not_found' && typeof command.args.id === 'string') {
+            data = traces.scriptRequestStatus(actor.agentId, command.args.id) ?? data;
+          }
+        }
+        return data;
+        }, () => replayed);
         connection.end(JSON.stringify({ schemaVersion: 1, ok: true, requestId: command.requestId, data }) + "\n");
       } catch (error) { connection.end(JSON.stringify({ schemaVersion: 1, ok: false, error: error instanceof Error ? error.message : String(error) }) + "\n"); }
     });
@@ -134,7 +154,7 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
           if (inspect[2] === 'traces' && inspect[3]) {
             const run = traces.get(inspect[3]);
             if (!run || run.agentId !== agent.id || (conversationId === "legacy" ? run.contextVersion === 1 : run.contextVersion !== 1 || run.channel !== conversationId)) { json(404, { error: '执行记录不存在。' }); return; }
-            json(200, { run, ...traces.events(run.id, number('after', 0, Number.MAX_SAFE_INTEGER)),
+            json(200, { run, skillUsage: traces.skillUsage(run.id), ...traces.events(run.id, number('after', 0, Number.MAX_SAFE_INTEGER)),
               related: traces.related(run.traceId).map(r => ({ id: r.id, agentId: r.agentId, channel: r.channel, status: r.status })), warning: traces.warning }); return;
           }
           if (inspect[2] === 'traces') {

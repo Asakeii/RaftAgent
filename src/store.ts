@@ -115,9 +115,9 @@ export class Store {
       commands: {
         readInbox: `raftctl inbox list --room ${quote(room.id)} --after-version ${Math.min(basedOn, room.version)} --limit 20 --json`,
         ...(inbox.nextCursor ? { nextPage: `raftctl inbox list --room ${quote(room.id)} --after-version ${Math.min(basedOn, room.version)} --limit 20 --cursor ${quote(inbox.nextCursor)} --json` } : {}),
-        retry: `${command} --action retry --based-on ${room.version} --request-id ${randomUUID()} --json`,
-        revise: `${command} --action revise --body '替换为重新判断后的正文' --based-on ${room.version} --request-id ${randomUUID()} --json`,
-        discard: `${command} --action discard --request-id ${randomUUID()} --json`,
+        retry: `${command} --action retry --based-on ${room.version} --json`,
+        revise: `${command} --action revise --body '替换为重新判断后的正文' --based-on ${room.version} --json`,
+        discard: `${command} --action discard --json`,
         note: '草稿参数为 --id，不是 --draft-id。修订正文先替换并正确 shell 转义，长正文可用 --body-file。再次版本冲突会返回新的 inbox，继续判断；不要盲目重试或 force。发送成功后无更多内容可调用 room silence 结束，不重复输出确认。',
       },
       actions: ["revise", "retry", "discard", "force"],
@@ -147,7 +147,7 @@ export class Store {
     this.event(s, "agent.result", `${child.name} 返回委派结果`);
     s.receipts.push({ messageId: id, agentId: input.replyToAgentId, read: false, arrival: s.seq });
   }
-  execute(actor: Actor, command: Command): unknown {
+  execute(actor: Actor, command: Command, onReplay?: () => void): unknown {
     const reads = ["inbox.list", "room.changes", "task.list", "request.status", "agent.list", "agent.status", ...contextReadCommands];
     const writing = !reads.includes(command.name);
     const execute = (s: AppState) => {
@@ -159,7 +159,7 @@ export class Store {
       const fingerprint = createHash("sha256").update(JSON.stringify({ name: command.name, args: command.args })).digest("hex");
       if (writing && s.requests[key]) {
         if (s.requests[key].fingerprint !== fingerprint) throw new DomainError("同一 requestId 不可用于不同内容");
-        return s.requests[key].result;
+        onReplay?.(); return s.requests[key].result;
       }
       if (writing && actor.kind === "agent" && s.runs.find(r => r.id === actor.runId)?.silent) throw new DomainError("本轮已静默结束");
       const a = command.args;
@@ -273,6 +273,21 @@ export class Store {
           s.messages.push({ id: messageId, channel: agent.id, sender: "user", text, seq: ++s.seq, at: new Date().toISOString(), mentions: [] });
           s.inputs.push({ id: randomUUID(), agentId: agent.id, text, channel: agent.id, messageIds: [messageId], kind: "direct", status: "pending" });
           this.event(s, "input", `向 ${agent.name} 提交输入`); result = { status: "queued" }; break;
+        }
+        case "room.retract": {
+          const message = s.messages.find(m => m.id === a.id && !m.internalFor);
+          if (!message) throw new DomainError('消息不存在或不能撤回');
+          const room = this.room(s, actor, message.channel);
+          if (actor.kind === 'agent' && (actor.channel !== room.id || message.sender !== actor.agentId)) throw new DomainError('只能撤回当前群中自己发出的消息');
+          if (message.retractionOf) throw new DomainError('撤回通知不能再次撤回');
+          if (message.retractedAt) { result = { status: 'retracted', messageId: message.id, version: room.version }; break; }
+          const reason = a.reason === undefined ? '发送者撤回' : required(a.reason, '撤回原因').slice(0, 500);
+          message.retractedAt = new Date().toISOString(); message.retractionReason = reason;
+          message.text = '[消息已撤回]'; message.mentions = []; delete message.delivery;
+          const notice = this.message(s, room, message.sender, `消息 ${message.id} 已撤回：${reason}。不要再将原内容作为有效依据；撤回不撤销已经执行的操作。`, []);
+          Object.assign(notice, { retractionOf: message.id, replyToRequestId: message.sender === 'user' ? message.id : message.replyToRequestId });
+          this.event(s, 'message.retracted', `群消息已撤回：${message.id}`);
+          result = { status: 'retracted', messageId: message.id, notificationId: notice.id, version: room.version }; break;
         }
         case "room.silence": {
           const identity = agentOnly();

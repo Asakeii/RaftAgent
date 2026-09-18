@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { config } from "dotenv";
 import { runAgent } from "./agent.js";
 import { createAgentOptions } from "./config.js";
-import { controlCommand, controlHelp, sendControl } from "./control.js";
+import { controlCommand, controlHelp, sendControl, identifyCommand, ControlTransportError } from "./control.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -76,11 +76,18 @@ async function main(): Promise<number> {
 async function dispatch(): Promise<number> {
   const args = process.argv.slice(2);
   if (args[0] === "ctl") {
-    if (args.length === 1 || args.includes("--help") || args.includes("-h")) { console.log(controlHelp); return 0; }
+    const ownArgs = args.slice(0, args.indexOf('--') < 0 ? undefined : args.indexOf('--'));
+    if (args.length === 1 || ownArgs.includes("--help") || ownArgs.includes("-h")) { console.log(controlHelp); return 0; }
     try {
       const command = await controlCommand(args.slice(1), async () => { let input = ""; for await (const chunk of process.stdin) { input += String(chunk); if (input.length > 100_000) throw new Error("输入过大"); } return input; });
-      const result = await sendControl(command, process.env); console.log(JSON.stringify(result)); return result.ok ? 0 : 3;
-    } catch (error) { console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })); return 4; }
+      identifyCommand(command);
+      // Emit before dispatch so even an interrupted CLI leaves its operation ID in tool output.
+      console.error(JSON.stringify({ event: 'request.started', requestId: command.requestId, command: command.name }));
+      const result = command.name === 'skill.run' ? await (await import('./skill-runner.js')).runSkillScript(command, process.env) : await sendControl(command, process.env);
+      console.log(JSON.stringify(result)); return result.ok ? 0 : 3;
+    } catch (error) {
+      console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error), ...(error instanceof ControlTransportError ? { requestId: error.requestId, outcome: error.outcome } : {}) })); return 4;
+    }
   }
   if (args[0] === "serve") {
     config({ path: new URL("../.env", import.meta.url), quiet: true });
