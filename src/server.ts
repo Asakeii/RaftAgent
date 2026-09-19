@@ -10,6 +10,7 @@ import type { Command, Snapshot } from "./contracts.js";
 import { SkillManager } from "./skills.js";
 import { EvaluationService } from './evaluation.js';
 import type { JudgeRunner } from './evaluation-judge.js';
+import { EvolutionService, type EvolutionRunners } from './evolution.js';
 import { ModelSettings } from "./model-settings.js";
 import { TavilyService, readTavilyKey } from "./tavily.js";
 import { TraceStore } from "./trace.js";
@@ -29,7 +30,7 @@ export function parseCommand(value: unknown): Command {
   if (x.requestId !== undefined && (typeof x.requestId !== "string" || x.requestId.length > 150)) throw new DomainError("requestId 无效");
   return { name: x.name, args: x.args as Record<string, unknown>, ...(typeof x.requestId === "string" ? { requestId: x.requestId } : {}) };
 }
-export async function startService(root: string, dataDir: string, env: NodeJS.ProcessEnv, runner?: SessionRunner, historyReader?: HistoryReader, judgeRunner?: JudgeRunner) {
+export async function startService(root: string, dataDir: string, env: NodeJS.ProcessEnv, runner?: SessionRunner, historyReader?: HistoryReader, judgeRunner?: JudgeRunner, evolutionRunners?: EvolutionRunners) {
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const modelSettings = new ModelSettings(dataDir, env);
   const runtimeEnv = modelSettings.env;
@@ -58,6 +59,7 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   const traces = new TraceStore(join(dataDir, 'traces.sqlite'));
   const executionTrace = new SkillExecutionTrace(traces, skills);
   const evaluations = new EvaluationService(dataDir, traces, store, modelSettings, judgeRunner);
+  const evolution = new EvolutionService(dataDir, evaluations, skills, modelSettings, evolutionRunners);
   const scheduler = new Scheduler(store, runtimeEnv, socket, root, bin, runner, skills, traces);
   scheduler.yolo = modelSettings.view().yolo;
   scheduler.pricing = () => modelSettings.view().pricing;
@@ -129,6 +131,22 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
       if (url.pathname.startsWith("/api/")) {
         if (req.headers.authorization !== `Bearer ${token}`) { json(401, { error: "未授权" }); return; }
         if (closing) { json(503, { error: "服务正在退出" }); return; }
+        const evolutionRoute = url.pathname.match(/^\/api\/agents\/([^/]+)\/traces\/([^/]+)\/evaluations\/([^/]+)\/evolutions(?:\/([^/]+)\/(cancel|promote|rollback))?$/);
+        if (evolutionRoute) {
+          const [, agentId, runId, evaluationId, evolutionId, action] = evolutionRoute;
+          const run = traces.get(runId!), evaluation = evaluations.store.get(evaluationId!);
+          const conversationId = url.searchParams.get('conversationId') || agentId;
+          const validScope = conversationId === agentId || conversationId === 'legacy' || store.state.rooms.some(r => r.id === conversationId && r.members.includes(agentId!));
+          if (!store.state.agents.some(a => a.id === agentId) || !run || run.agentId !== agentId || !evaluation || evaluation.runId !== runId || !validScope || (conversationId === 'legacy' ? run.contextVersion === 1 : run.contextVersion !== 1 || run.channel !== conversationId)) { json(404, { error: '评测记录不存在。' }); return; }
+          if (req.method === 'GET' && !evolutionId) { json(200, { skills: evolution.available(evaluationId!), evolutions: evolution.store.list(evaluationId!) }); return; }
+          if (req.method === 'POST') {
+            if (!evolutionId) json(202, evolution.start(evaluationId!, await body(req)));
+            else if (action === 'cancel') { evolution.cancel(evolutionId, evaluationId!); json(200, { ok: true }); }
+            else json(200, await evolution.switchVersion(evolutionId, evaluationId!, action === 'rollback'));
+            return;
+          }
+          json(405, { error: '不支持该操作。' }); return;
+        }
         if (url.pathname === '/api/evaluator' && req.method === 'GET') { json(200, evaluations.profile()); return; }
         const evaluationRoute = url.pathname.match(/^\/api\/agents\/([^/]+)\/traces\/([^/]+)\/evaluations(?:\/([^/]+)\/cancel)?$/);
         if (evaluationRoute) {
@@ -239,11 +257,13 @@ export async function startService(root: string, dataDir: string, env: NodeJS.Pr
   const close = (): Promise<void> => closePromise ??= (async () => {
     closing = true;
     for (const client of subscribers) client.end(); subscribers.clear();
+    await evolution.close();
     await evaluations.close();
     await scheduler.close();
     await skills.close();
     await Promise.all([new Promise<void>(r => http.close(() => r())), new Promise<void>(r => ipc.close(() => r()))]);
+    evolution.dispose();
     traces.close(); store.close(); await unlink(socket).catch(() => {}); await unlink(lockPath);
   })();
-  return { url: `http://127.0.0.1:${address.port}/#${token}`, token, port: address.port, store, scheduler, skills, traces, evaluations, socket, close };
+  return { url: `http://127.0.0.1:${address.port}/#${token}`, token, port: address.port, store, scheduler, skills, traces, evaluations, evolution, socket, close };
 }

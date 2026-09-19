@@ -6,6 +6,8 @@ import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import type { Actor, Command, SharedSkill } from "./contracts.js";
 import { DomainError, required, Store } from "./store.js";
 import { migrateRequestIdGuide } from './request-id-guide.js';
+import type { EvolutionFile } from './evolution-contracts.js';
+import { parseFiles, writeFiles as writeEvolutionFiles } from './evolution-files.js';
 
 type AgentActor = Extract<Actor, { kind: "agent" }>;
 type SkillQuery = Pick<Query, "reloadSkills">;
@@ -33,6 +35,50 @@ export class SkillManager {
   private release(skill: SharedSkill) { return resolve(this.directory, "releases", skill.id, skill.version); }
   private source(id: string) { return resolve(this.directory, "sources", id); }
   catalogView() { return this.catalog().map(s => ({ ...s, skill: `${s.plugin}:${s.name}`, directory: this.release(s), source: this.source(s.id) })); }
+  evolutionSnapshot(id: string) {
+    const skill = this.catalog().find(s => s.id === id);
+    if (!skill || skill.plugin !== 'raft-local') throw new DomainError('首期仅支持本地自建 Skill，不能进化内置协作能力。');
+    const bundle = this.readDirectory(this.release(skill));
+    if (bundle.version !== skill.version) throw new DomainError('已发布 Skill 的内容与版本不一致。');
+    const files = parseFiles(bundle.files.map(f => {
+      if (f.executable || f.path.startsWith('scripts/') || !f.bytes.equals(Buffer.from(f.bytes.toString('utf8')))) throw new DomainError('首期仅支持无脚本的文本型 Skill。');
+      return { path: f.path, text: f.bytes.toString('utf8') };
+    }));
+    return { skill: { ...skill }, files };
+  }
+  validateEvolution(name: string, files: EvolutionFile[]) {
+    const root = join(this.directory, `evolution-validation-${randomUUID()}`);
+    try {
+      writeEvolutionFiles(root, parseFiles(files));
+      const bundle = this.readDirectory(root);
+      if (bundle.name !== name || bundle.files.some(f => f.path.startsWith('scripts/'))) throw new DomainError('候选不能改名或加入脚本。');
+      return bundle;
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+  /** Serialized with ordinary publications. Only the evolution service calls this after its gate. */
+  installEvolution(id: string, expectedVersion: string, files: EvolutionFile[], targetVersion: string) {
+    const work = this.queue.catch(() => {}).then(() => {
+      const current = this.catalog().find(s => s.id === id);
+      if (!current || current.plugin !== 'raft-local' || current.version !== expectedVersion) throw new DomainError('正式版本已变化，请基于新版本重新评测。');
+      if (this.store.state.agents.some(a => this.enabledIds(a.id).includes(id) && this.store.state.runs.some(r => r.agentId === a.id && r.status === 'running'))) throw new DomainError('仍有使用该 Skill 的 Agent 正在运行，请结束后再切换版本。');
+      const source = this.readDirectory(this.source(id));
+      if (source.version !== expectedVersion) throw new DomainError('Skill 源码存在未发布修改，请先处理，避免覆盖。');
+      const bundle = this.validateEvolution(current.name, files);
+      if (bundle.version !== targetVersion) throw new DomainError('候选内容与已验证版本不一致。');
+      const next = { ...current, version: targetVersion, description: bundle.description, publishedAt: new Date().toISOString() };
+      this.writeFiles(this.release(next), bundle.files);
+      this.writeFiles(this.source(id), bundle.files, true);
+      try {
+        this.store.transact(s => {
+          s.skillCatalog = s.skillCatalog!.map(v => v.id === id ? next : v);
+          this.store.event(s, 'skill.evolution', `${next.name} 切换至已记录的进化版本 ${targetVersion.slice(0, 8)}`);
+        });
+      } catch (error) { this.writeFiles(this.source(id), source.files, true); throw error; }
+      return next;
+    });
+    this.queue = work.catch(() => {});
+    return work;
+  }
   async migrateRequestIdGuidance() {
     const skill = this.catalog().find(s => s.id === 'builtin-raft-collaboration' && s.plugin === 'raft');
     if (!skill) return;

@@ -3,6 +3,7 @@ import { DEFAULT_EVALUATION_RULES, type Evaluation, type EvaluationProfile, type
 import type { TraceRun } from '../src/inspection-contracts';
 import { useLive } from './useInspectionData';
 import './evaluation.css';
+import { EvolutionPanel } from './EvolutionPanel';
 
 type Api = (path: string, data?: unknown) => Promise<any>;
 const verdicts = { pass: '通过', fail: '失败', unknown: '未知', inconclusive: '待判定' };
@@ -60,6 +61,7 @@ export function EvaluationPanel({ run, conversationId, api }: { run: TraceRun; c
       {selected.states.map(rule => <div key={rule.id} className="evaluation-rule-result"><div><strong>{rule.id.toUpperCase()} · {rule.text}</strong><span className={`evaluation-verdict ${rule.verdict}`}>{verdicts[rule.verdict]}{rule.required ? ' · 必须' : ' · 参考'}</span></div><p>{rule.reason}</p><div className="evaluation-evidence-links">{rule.evidenceRefs.map(ref => <button key={ref} onClick={() => setEvidenceId(ref)}>{ref}</button>)}</div></div>)}
       {evidence && <div className="evaluation-evidence"><strong>{evidence.id} · {evidence.kind}</strong><p className="evaluation-hint">{evidence.at} · Run {evidence.runId}</p><pre>{evidence.text}</pre></div>}
       <details><summary>窗口状态变化与证据快照</summary><p className="evaluation-hint">快照 SHA-256：{selected.evidenceHash}</p>{selected.windows.map(w => <details className="evaluation-window" key={w.index}><summary>窗口 {w.index} · {w.evidenceIds.length} 条证据 · {(w.durationMs / 1000).toFixed(1)} 秒</summary>{w.states.map(r => <p key={r.id}><strong>{r.id} · {verdicts[r.verdict]}</strong> {r.reason}</p>)}<div className="evaluation-evidence-links">{w.evidenceIds.map(id => <button key={id} onClick={() => setEvidenceId(id)}>{id}</button>)}</div></details>)}</details>
+      {selected.status === 'completed' && selected.verdict !== 'pass' && <EvolutionPanel key={selected.id} base={`${base}/${selected.id}/evolutions`} query={scopeQuery} api={api} />}
     </div>}
   </section>;
 }
